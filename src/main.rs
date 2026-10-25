@@ -10,7 +10,7 @@ use std::sync::Arc;
 use saddle::agent::{Agent, AgentHandle};
 use saddle::app::{self, App, Status};
 use saddle::provider::GenaiProvider;
-use saddle::tools::{ProjectFs, Registry};
+use saddle::tools::{ProjectFs, Registry, web_search};
 use saddle::watch::{Observed, WatchConfig, Watcher};
 use saddle::{config, events, project, prompt, tui};
 
@@ -48,11 +48,12 @@ async fn run() -> anyhow::Result<()> {
         .with_context(|| format!("cannot resolve project root from {}", cwd.display()))?;
     let home = std::env::var_os("HOME").map(PathBuf::from);
 
-    let status = Status {
+    let mut status = Status {
         project: project::display_path(&project_root, home.as_deref()),
         model: loaded.config.model.clone(),
         api: loaded.config.api.to_string(),
         sandbox: "not available".into(),
+        web_search: None,
     };
     let provider = GenaiProvider::new(&loaded.config, &loaded.credentials, home.as_deref())
         .context("cannot set up the inference client")?;
@@ -70,9 +71,16 @@ async fn run() -> anyhow::Result<()> {
         observed.clone(),
         senders.fs.clone(),
     );
+    let mut tools = Registry::read_only(fs, observed);
+    status.web_search = web_search::install(
+        &mut tools,
+        &loaded.config.search,
+        loaded.credentials.exa.as_ref(),
+    )
+    .context("cannot set up the web search client")?;
     let agent = Agent::new(
         Arc::new(provider),
-        Registry::read_only(fs, observed),
+        tools,
         prompt::system(&project_root),
         senders.agent.clone(),
     );

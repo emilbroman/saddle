@@ -1,0 +1,5 @@
+{
+  "requestId": "ac9f416479170b2bde6e8817d85da0fe",
+  "error": "Invalid API key. Provide a valid key using 'Authorization: Bearer <key>' or 'x-api-key: <key>'. Create a key at https://dashboard.exa.ai/api-keys",
+  "tag": "INVALID_API_KEY"
+}

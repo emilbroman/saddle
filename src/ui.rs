@@ -84,6 +84,9 @@ fn render_status(frame: &mut Frame, app: &App, area: Rect) {
             base.fg(Color::Yellow),
         ),
     ];
+    if let Some(hint) = &status.web_search {
+        spans.push(Span::styled(format!(" {hint} "), base.fg(Color::Yellow)));
+    }
     match app.activity {
         Activity::Idle => {}
         Activity::Working => spans.push(Span::styled(

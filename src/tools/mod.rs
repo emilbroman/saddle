@@ -1,10 +1,11 @@
 //! Tools the agent can call. Every tool is read-only; later slices add the
-//! sandboxed shell, LSP queries and web search through the same [`Tool`] trait.
+//! sandboxed shell and LSP queries through the same [`Tool`] trait.
 
 pub mod fs;
 mod grep;
 mod list;
 mod read_file;
+pub mod web_search;
 
 use std::sync::Arc;
 
@@ -16,6 +17,7 @@ pub use fs::ProjectFs;
 pub use grep::Grep;
 pub use list::{Glob, List};
 pub use read_file::ReadFile;
+pub use web_search::WebSearch;
 
 use crate::watch::Observed;
 
@@ -72,6 +74,9 @@ impl Registry {
     }
 
     pub fn register(&mut self, tool: impl Tool + 'static) {
+        // genai sends a tool named `web_search` as the provider's built-in
+        // server-side search, whose stream it then fails to parse.
+        assert_ne!(tool.name(), "web_search", "reserved tool name");
         assert!(
             self.get(tool.name()).is_none(),
             "duplicate tool {}",
@@ -232,6 +237,30 @@ mod tests {
         let output = registry.call("write_file", json!({})).await;
         assert!(output.is_error);
         assert!(output.content.contains("read_file, list, glob, grep"));
+    }
+
+    #[test]
+    #[should_panic(expected = "reserved tool name")]
+    fn registry_refuses_provider_builtin_names() {
+        struct Builtin;
+        impl Tool for Builtin {
+            fn name(&self) -> &'static str {
+                "web_search"
+            }
+            fn description(&self) -> &'static str {
+                ""
+            }
+            fn schema(&self) -> Value {
+                json!({"type": "object"})
+            }
+            fn summary(&self, _: &Value) -> String {
+                String::new()
+            }
+            fn call(&self, _: Value) -> BoxFuture<'static, ToolOutput> {
+                Box::pin(async { ToolOutput::ok("") })
+            }
+        }
+        Registry::default().register(Builtin);
     }
 
     #[tokio::test]

@@ -40,6 +40,25 @@ While the agent is working, Enter keeps your draft in the input instead of
 sending it; press Esc to interrupt. An interrupted answer stays in the
 transcript, marked `[interrupted]`, and the agent sees what it had said so far.
 
+Shell start, wait and output results show their job status and the last 20
+wrapped output lines by default. Ctrl+O shows the full result; pressing it again
+returns to the tail preview. Other tool results remain collapsed by default.
+
+### Conversation
+
+Saddle proposes one actionable step at the highest level of intent, descending
+into locations and signatures only when needed. It explains why, rather than
+handing you function bodies or patches. Once an edit completes the step and
+diagnostics settle, it moves to the next step without asking for confirmation.
+It challenges divergent choices and runs checks proactively.
+
+Automatic changes need not earn an acknowledgement: the `no_comment` tool ends
+an uneventful automatic turn with no assistant text, leaving the change entry
+and tool call. User messages always get an answer; their text cannot enable
+this tool. Automatic-event responses are buffered per model response so a quiet
+reaction cannot leak a streamed acknowledgement. User-message responses still
+stream normally. The tool call and result are saved for valid provider replay.
+
 ### Saved changes
 
 Saddle watches the project and tells the agent when you save. Changes are
@@ -86,8 +105,8 @@ repository or its git directory. Moving or renaming a worktree starts a new
 session; different worktrees have independent conversations. A lock refuses a
 second Saddle instance on the same worktree.
 
-Reopening restores the full transcript, scrolled to the end, with tool results
-collapsed. If nothing changed, resume is silent: no agent turn starts. Edits made
+Reopening restores the full transcript, scrolled to the end, with ordinary tool
+results collapsed and shell results showing their tail preview. If nothing changed, resume is silent: no agent turn starts. Edits made
 while Saddle was closed are reported as diffs against the last content Saddle
 observed. Files whose current content matches `HEAD` are folded silently into
 the snapshots; git-movement notifications are a follow-up feature, not yet

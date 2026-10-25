@@ -144,7 +144,7 @@ impl App {
         if !inputs.is_empty()
             && let Some(agent) = &self.agent
         {
-            agent.send(inputs.join("\n\n"));
+            agent.send_automatic(inputs.join("\n\n"));
             self.activity = Activity::Working;
         }
     }
@@ -377,7 +377,7 @@ impl App {
                 text.push('\n');
                 text.push_str(diagnostic);
             }
-            agent.send(text);
+            agent.send_automatic(text);
             self.activity = Activity::Working;
         }
     }

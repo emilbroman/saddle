@@ -6,6 +6,7 @@ pub mod fs;
 mod grep;
 mod list;
 pub mod lsp;
+mod no_comment;
 mod read_file;
 pub mod shell;
 pub mod web_search;
@@ -92,6 +93,7 @@ impl Registry {
         registry.register(List::new(fs.clone()));
         registry.register(Glob::new(fs.clone()));
         registry.register(Grep::new(fs));
+        registry.register(no_comment::NoComment);
         registry
     }
 

@@ -4,6 +4,7 @@ pub mod agent;
 pub mod app;
 pub mod config;
 pub mod events;
+pub mod lsp;
 pub mod project;
 pub mod prompt;
 pub mod provider;

@@ -9,10 +9,12 @@ use std::sync::Arc;
 
 use saddle::agent::{Agent, AgentHandle};
 use saddle::app::{self, App, Status};
+use saddle::lsp::LspManager;
 use saddle::provider::GenaiProvider;
 use saddle::tools::{ProjectFs, Registry, web_search};
 use saddle::watch::{Observed, WatchConfig, Watcher};
 use saddle::{config, events, project, prompt, tui};
+use tokio::sync::broadcast::error::RecvError;
 
 #[tokio::main]
 async fn main() -> ExitCode {
@@ -61,7 +63,7 @@ async fn run() -> anyhow::Result<()> {
         .with_context(|| format!("cannot open project root {}", project_root.display()))?;
     let (senders, receivers) = events::channels();
     let observed = Observed::default();
-    let _watcher = Watcher::spawn(
+    let watcher = Watcher::spawn(
         project_root.clone(),
         WatchConfig {
             quiet: Duration::from_millis(loaded.config.batching.quiet_ms),
@@ -78,6 +80,13 @@ async fn run() -> anyhow::Result<()> {
         loaded.credentials.exa.as_ref(),
     )
     .context("cannot set up the web search client")?;
+    let lsp = LspManager::new(
+        project_root.clone(),
+        &loaded.config.lsp,
+        Some(senders.lsp.clone()),
+    );
+    lsp.start_detected();
+    feed_changes(&watcher, lsp.clone());
     let agent = Agent::new(
         Arc::new(provider),
         tools,
@@ -96,5 +105,20 @@ async fn run() -> anyhow::Result<()> {
     let (mut terminal, guard) = tui::init().context("cannot initialise the terminal")?;
     let result = app::run(&mut terminal, &mut app, EventStream::new(), receivers).await;
     drop(guard);
+    lsp.shutdown().await;
     result
+}
+
+/// Keeps language servers in step with saved changes.
+fn feed_changes(watcher: &Watcher, lsp: LspManager) {
+    let mut changes = watcher.subscribe();
+    tokio::spawn(async move {
+        loop {
+            match changes.recv().await {
+                Ok(set) => lsp.did_change(set.files.iter().map(|f| f.path.clone()).collect()),
+                Err(RecvError::Lagged(_)) => continue,
+                Err(RecvError::Closed) => break,
+            }
+        }
+    });
 }

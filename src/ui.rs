@@ -6,6 +6,7 @@ use ratatui::widgets::{Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarStat
 use unicode_width::UnicodeWidthStr;
 
 use crate::app::{Activity, App};
+use crate::lsp::ServerState;
 
 const MAX_INPUT_ROWS: usize = 8;
 
@@ -86,6 +87,16 @@ fn render_status(frame: &mut Frame, app: &App, area: Rect) {
     ];
     if let Some(hint) = &status.web_search {
         spans.push(Span::styled(format!(" {hint} "), base.fg(Color::Yellow)));
+    }
+    if let Some(lsp) = crate::lsp::status_summary(&app.lsp_status) {
+        let failing = app.lsp_status.iter().any(|s| {
+            matches!(
+                s.state,
+                ServerState::Failed(_) | ServerState::Restarting { .. }
+            )
+        });
+        let color = if failing { Color::Red } else { Color::Yellow };
+        spans.push(Span::styled(format!(" lsp: {lsp} "), base.fg(color)));
     }
     match app.activity {
         Activity::Idle => {}

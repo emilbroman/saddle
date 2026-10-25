@@ -12,7 +12,10 @@ use ratatui_textarea::{TextArea, WrapMode};
 
 use crate::agent::AgentHandle;
 use crate::config::{Config, Credentials};
-use crate::events::{AgentEvent, EventReceivers, EventSenders, FsEvent, JobEvent, TurnOutcome};
+use crate::events::{
+    AgentEvent, EventReceivers, EventSenders, FsEvent, JobEvent, LspEvent, TurnOutcome,
+};
+use crate::lsp::{ServerState, ServerStatus};
 use crate::transcript::{Entry, NoticeLevel, Scroll, StreamState, Transcript};
 use crate::ui;
 use crate::watch::{ChangeSet, message};
@@ -51,6 +54,7 @@ pub struct App {
     pub should_quit: bool,
     /// Change sets waiting for the interrupted turn to wind down.
     pending_changes: Vec<Arc<ChangeSet>>,
+    pub lsp_status: Vec<ServerStatus>,
     /// Transcript size from the last render, for scrolling: (total lines, viewport rows).
     pub(crate) transcript_metrics: (usize, usize),
 }
@@ -76,6 +80,7 @@ impl App {
             input: new_input(),
             should_quit: false,
             pending_changes: Vec::new(),
+            lsp_status: Vec::new(),
             transcript_metrics: (0, 0),
         }
     }
@@ -252,6 +257,38 @@ impl App {
         }
     }
 
+    pub fn handle_lsp_event(&mut self, event: LspEvent) {
+        match event {
+            LspEvent::Status(statuses) => {
+                for status in &statuses {
+                    let before = self
+                        .lsp_status
+                        .iter()
+                        .find(|s| s.language == status.language && s.root == status.root)
+                        .map(|s| &s.state);
+                    if before == Some(&status.state) {
+                        continue;
+                    }
+                    let text = match &status.state {
+                        ServerState::Restarting { attempt, reason } => format!(
+                            "The {} language server stopped ({reason}); restarting (attempt {attempt}).",
+                            status.language
+                        ),
+                        ServerState::Failed(reason) => {
+                            format!("The {} language server failed: {reason}", status.language)
+                        }
+                        _ => continue,
+                    };
+                    self.transcript.push(Entry::Notice {
+                        text,
+                        level: NoticeLevel::Error,
+                    });
+                }
+                self.lsp_status = statuses;
+            }
+        }
+    }
+
     pub fn handle_job_event(&mut self, event: JobEvent) {
         match event {
             JobEvent::Finished { id, exit_code } => self.transcript.push(Entry::Notice {
@@ -308,6 +345,7 @@ where
             }
             Some(event) = events.fs.recv() => app.handle_fs_event(event),
             Some(event) = events.job.recv() => app.handle_job_event(event),
+            Some(event) = events.lsp.recv() => app.handle_lsp_event(event),
         }
 
         if app.should_quit {

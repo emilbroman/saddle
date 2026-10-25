@@ -117,6 +117,29 @@ route that surfaces their reasoning), and `melious/*` models work on either.
 TLS uses the operating system's trust store (the Keychain on macOS). If the
 endpoint's CA is not trusted there, point `ca_file` at it.
 
+### Language servers
+
+Each `[lsp.<language>]` table configures one server; the table name is also
+the `languageId` sent to it, so use the usual identifiers (`rust`, `python`,
+`typescript`, …). A file belongs to the first language (in name order) whose
+`file_types` contains its extension or its whole file name.
+
+Servers start in the background at launch for each language that has files in
+the project (respecting `.gitignore`), or later when a file of that language
+changes or is queried. There is one server per language and workspace root;
+the root is the topmost directory between the file and the project root that
+contains one of `root_markers`, or the project root. Servers get no settings
+(`workspace/configuration` is answered with nulls), so they run with their
+defaults. Saddle syncs documents from disk only and never applies workspace
+edits.
+
+The status line shows each server's state (`starting…`, `✓`, the title of its
+work in progress such as `indexing…`, `restarting`, `✗ failed`). A server that
+crashes is restarted up to three times within five minutes; a command that
+cannot be started is not retried. For rust-analyzer, make sure the standard
+library sources are available (`rustup component add rust-src`, or
+`RUST_SRC_PATH` as the Nix dev shell sets it).
+
 ### `credentials.toml`
 
 Secrets only. Keep it private (`chmod 600`). Saddle never prints its values,
@@ -167,7 +190,7 @@ A single crate with a library (`src/lib.rs`) and a thin binary (`src/main.rs`):
 - `project` — project-root resolution.
 - `transcript` — the conversation model (user, assistant, tool call/result and
   notice entries), its wrapped layout and the transcript scroll state.
-- `events` — channels for agent, filesystem and job events.
+- `events` — channels for agent, filesystem, job and language-server events.
 - `agent` — the conversation and its turn loop (stream, run tool calls, feed
   results back, repeat), on its own task behind `AgentHandle`, which also
   interrupts the running turn.
@@ -179,6 +202,11 @@ A single crate with a library (`src/lib.rs`) and a thin binary (`src/main.rs`):
   filtering, the batching policy, the record of what Saddle last saw of each
   file, and the change event sent to the agent. Change sets also go to
   `Watcher::subscribe` receivers.
+- `lsp` — the generic language-server client: one supervised process per
+  language and workspace root (`async-lsp` over stdio), document sync from
+  disk, a diagnostics store with a settle signal, and definition, references,
+  hover and symbol queries in Unicode-character positions, converted to the
+  server's negotiated encoding.
 - `prompt` — the system prompt.
 - `app` — application state and the central `tokio::select!` event loop over
   terminal input and those channels.
@@ -196,4 +224,11 @@ cargo fmt
 `tests/smoke.rs` drives the event loop headlessly against ratatui's test
 backend, including agent turns with a scripted provider and a file change
 interrupting a turn. `tests/watch.rs` runs the watcher against the real
-filesystem.
+filesystem. `tests/lsp.rs` runs the LSP client against a scripted
+server (`tests/fixtures/fake_lsp.py`; skipped without `python3`). A slower
+smoke test against a real rust-analyzer on a copy of this crate is ignored by
+default:
+
+```sh
+cargo test --test lsp_rust_analyzer -- --ignored --nocapture
+```

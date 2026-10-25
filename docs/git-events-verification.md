@@ -56,6 +56,12 @@ credentials were not exposed to shell commands.
    > is the opposite of true. Saddle has no write access and must not claim
    > otherwise. Worth correcting before that text propagates anywhere.
 
+The optimized release binary restored the full transcript and stayed silent on
+unchanged resume: the journal SHA-256 remained identical. `/new` archived it and
+produced only a fresh first-launch event and “On `smoke-feature` at `84b0663`. What
+are we working on?” Both sandbox backends were additionally required in a
+separate passing integration run, and real watcher suites passed again.
+
 These are observed model reactions, not deterministic guarantees. The existing
 conversation prompt was retained without a provisional git paragraph.
 

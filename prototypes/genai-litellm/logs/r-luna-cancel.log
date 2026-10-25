@@ -1,0 +1,8 @@
+== api=responses model=chatgpt/gpt-5.6-luna scenario=cancel
+1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 
+  [cancelled after 40 chunks at 1.686321466s]
+pong
+  [end: stop=Some(Completed("completed")) response_id=Some("resp_TJ8dSse-a5J4eX4TuCua3QPpx7fZR20u38Qmoc9wCbyvRu3yEhSgbvLLflGjpij-BPXsa_1PvKRg_QNIo8jidAXUDWIXTiYu2vPdMz1pHqIxpTVtWjSvYBowHKv1e9Fb8RY8ydzD9GKo8PIDH0Vb4q_0LdnDVY4zNZwTFug_OxvONagd7v3Qp08O77pBGHoVxITlboZnm6FbpIVtW7lrQXDbnAWsxfYyEKuhMJn5Ct6g4yF7wQfwiZ7MaKGuCip4FlEofEZMepz1R6VK-m3CV86zl_T8TznspAENcfv-szkLVsj7L99cudCJpRdQP_Q3zgocwrPZZuEDi4BO8SyAOU38Gk-iwmrMvuhDpsn9nXS614Sd5IRDwTAZKl7JcjZcV8nGVtizkLHXB-xRS5_eYEjpFLMtocZJfqvpftTZCv3y1Q06wzh_ncVHgSMST1v82W6v") first_token=Some(902.9144ms) total=963.291226ms]
+  [usage: prompt=Some(13) completion=Some(5) reasoning=None]
+  [captured parts: ["text"]]
+OK cancel: follow-up succeeded in 963.336391ms

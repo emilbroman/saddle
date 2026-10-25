@@ -1,0 +1,27 @@
+== api=messages model=anthropic/claude-haiku-4-5-20251001 scenario=tools
+I'll check the Cargo.toml file to see the Rust edition and dependencies.
+  [tool-call chunk id=toolu_01A9vVk773NCYG5BGCDFy6uZ fn=read_file args=""]
+
+  [tool-call chunk id=toolu_01A9vVk773NCYG5BGCDFy6uZ fn=read_file args=""]
+
+  [tool-call chunk id=toolu_01A9vVk773NCYG5BGCDFy6uZ fn=read_file args="{\"path\""]
+
+  [tool-call chunk id=toolu_01A9vVk773NCYG5BGCDFy6uZ fn=read_file args="{\"path\": \"Carg"]
+
+  [tool-call chunk id=toolu_01A9vVk773NCYG5BGCDFy6uZ fn=read_file args="{\"path\": \"Cargo.toml\"}"]
+
+  [end: stop=Some(ToolCall("tool_use")) response_id=None first_token=Some(584.890263ms) total=944.271209ms]
+  [usage: prompt=Some(622) completion=Some(77) reasoning=None]
+  [captured parts: ["text", "tool_call"]]
+  -> executing read_file(Cargo.toml) for call_id=toolu_01A9vVk773NCYG5BGCDFy6uZ
+Based on the Cargo.toml file:
+
+**Rust Edition:** 2024
+
+**Dependencies:**
+1. **ratatui** - version 0.30 (a terminal UI library)
+2. **tokio** - version 1 with the "full" feature enabled (an async runtime)
+  [end: stop=Some(Completed("end_turn")) response_id=None first_token=Some(1.176579278s) total=1.617115419s]
+  [usage: prompt=Some(768) completion=Some(71) reasoning=None]
+  [captured parts: ["text"]]
+OK tools: final answer after 2 model call(s)

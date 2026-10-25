@@ -1,0 +1,30 @@
+== api=responses model=chatgpt/gpt-5.6-luna scenario=tools
+[2m**Inspecting Cargo.toml file**[0m
+  [tool-call chunk id=call_62b7d8771a7a4ad2b330384562afba82 fn=read_file args="{\""]
+
+  [tool-call chunk id=call_62b7d8771a7a4ad2b330384562afba82 fn=read_file args="{\"path"]
+
+  [tool-call chunk id=call_62b7d8771a7a4ad2b330384562afba82 fn=read_file args="{\"path\":\""]
+
+  [tool-call chunk id=call_62b7d8771a7a4ad2b330384562afba82 fn=read_file args="{\"path\":\"Cargo"]
+
+  [tool-call chunk id=call_62b7d8771a7a4ad2b330384562afba82 fn=read_file args="{\"path\":\"Cargo.tom"]
+
+  [tool-call chunk id=call_62b7d8771a7a4ad2b330384562afba82 fn=read_file args="{\"path\":\"Cargo.toml"]
+
+  [tool-call chunk id=call_62b7d8771a7a4ad2b330384562afba82 fn=read_file args="{\"path\":\"Cargo.toml\"}"]
+
+  [end: stop=Some(Completed("completed")) response_id=Some("resp_I4yUd1zSZjHlv1lc0_Bp_F7F6Pqa4Jx297jJHPgLtvsd7Wl8lEC2UDYrMtxxDyQZDu5QB5jK_Dw4hroKKxRL9idvM8BmSadge8129RM0aNWNOBYES4EHUGc8EJuxr8xTETbyXf3on7077eyMbQ41qp4Ov4xrtIvfDrWvYeTgmQk9xGiioWF-p2ID01tiBhJP981NHnaI8XC0vJJq8xcyZYW05v9SxIpAxGs4MKQCworKcMd4k3fVoS90NU5diX0Uw94wAs2Z59n6YfHxUCNx8shcOjYQzcDyaSslMeWigGhBaxJPTaCj4Drw89tmNxaaxHPjsD2dQfRedCW0L4ayOngGFCAaFRQoOY7vckfjUhgElYQgDYP4E2YaIJJrl9W-YR19CM1f-WQnAKambbNdmBeE3PqYvBkCz24pNTBoir5uaiLtpLyI_e5apnjBHH2uc0bH") first_token=Some(1.318346498s) total=1.394919102s]
+  [usage: prompt=Some(91) completion=Some(34) reasoning=Some(12)]
+  [captured parts: ["thought_signature", "tool_call"]]
+  -> executing read_file(Cargo.toml) for call_id=call_62b7d8771a7a4ad2b330384562afba82
+The project uses:
+
+- **Rust edition:** 2024
+- **Dependencies:**
+  - `ratatui` version `0.30`
+  - `tokio` version `1`, with the `full` feature enabled
+  [end: stop=Some(Completed("completed")) response_id=Some("resp_vlpSt7K7IsAHVtQ8O1L-iUVjsjuhJuu2ZtL3N2R1j6zTj9yT4U_nHpu4ALYE5TDLmTuLtzR9Jj5AvGu6zWFnM0d1StFCU703Tid5SpR3Ft6AkLX45JOImOSrfPZkLI-L2F1foCTFUA9szsNNS9VnH6cGy9Nmc_xvZ0LAp6z6DCzYeAKOAYe419Cz4ColehhR0ukO8eRy4PrF7IxS87LdKPMqdeIzX8so7XWpUtxZixe3R5uMyQ0UVXUH2v52DhPvmyq6WxbKE4yLMZ_T2R6ZAu8XSxQm76Je37f3if10icUNifvEBlcBB1WjbH2x1_W-MMjSKJ8nCxQLqn7GIAiDYU5qrFM7dD50Qrx7N53aYIHaXPrSgCyXcLd4Qb-vzg-n9hfqEftxurpyvr-450HBN9WZd4rGPuAZI3ecyeX034GaTDX4dFk4_N_eqPJocLHh26JJ") first_token=Some(1.021141267s) total=1.378538638s]
+  [usage: prompt=Some(187) completion=Some(52) reasoning=None]
+  [captured parts: ["text"]]
+OK tools: final answer after 2 model call(s)

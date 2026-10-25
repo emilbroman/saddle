@@ -1,0 +1,30 @@
+== api=messages model=melious/glm-5.3 scenario=tools
+
+  [tool-call chunk id=call_c2411b09faa44149a11a9442 fn=read_file args=""]
+
+  [tool-call chunk id=call_c2411b09faa44149a11a9442 fn=read_file args="{\"pat"]
+
+  [tool-call chunk id=call_c2411b09faa44149a11a9442 fn=read_file args="{\"path\": \""]
+
+  [tool-call chunk id=call_c2411b09faa44149a11a9442 fn=read_file args="{\"path\": \"Cargo"]
+
+  [tool-call chunk id=call_c2411b09faa44149a11a9442 fn=read_file args="{\"path\": \"Cargo.toml"]
+
+  [tool-call chunk id=call_c2411b09faa44149a11a9442 fn=read_file args="{\"path\": \"Cargo.toml\"}"]
+
+  [end: stop=Some(ToolCall("tool_use")) response_id=None first_token=None total=461.916305ms]
+  [usage: prompt=Some(202) completion=Some(14) reasoning=None]
+  [captured parts: ["tool_call"]]
+  -> executing read_file(Cargo.toml) for call_id=call_c2411b09faa44149a11a9442
+[2mRepor[0m[2mt the[0m[2m find[0m[2mings.[0mThe project uses **Rust edition 2024** and has two dependencies:
+
+| Dependency | Version | Features |
+|---|---|---|
+| `ratatui` | 0.30 | — |
+| `tokio` | 1 | `full` |
+
+The package itself is named `saddle` at version 0.0.1.
+  [end: stop=Some(Completed("end_turn")) response_id=None first_token=Some(895.535454ms) total=904.804974ms]
+  [usage: prompt=Some(271) completion=Some(81) reasoning=None]
+  [captured parts: ["text"]]
+OK tools: final answer after 2 model call(s)

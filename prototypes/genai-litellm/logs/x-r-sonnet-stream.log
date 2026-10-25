@@ -1,0 +1,5 @@
+== api=responses model=anthropic/claude-sonnet-4-6 scenario=stream
+Error: Web stream error for model 'anthropic/claude-sonnet-4-6 (adapter: OpenAIResp)'.
+Cause: HTTP error.
+Status: 429 Too Many Requests Too Many Requests
+Body: {"error":{"message":"litellm.RateLimitError: AnthropicException - b'{\"type\":\"error\",\"error\":{\"type\":\"rate_limit_error\",\"message\":\"Error\"},\"request_id\":\"req_011CgNtuK5kVw6zUr6YfnxqT\"}'","type":"throttling_error","param":null,"code":"429"}}

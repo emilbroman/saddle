@@ -1,0 +1,30 @@
+== api=responses model=chatgpt/gpt-5.6-luna scenario=tools
+[2m**Inspecting Cargo.toml file**[0m
+  [tool-call chunk id=call_47be44f19c674200a371a21f0cb6de02 fn=read_file args="{\""]
+
+  [tool-call chunk id=call_47be44f19c674200a371a21f0cb6de02 fn=read_file args="{\"path"]
+
+  [tool-call chunk id=call_47be44f19c674200a371a21f0cb6de02 fn=read_file args="{\"path\":\""]
+
+  [tool-call chunk id=call_47be44f19c674200a371a21f0cb6de02 fn=read_file args="{\"path\":\"Cargo"]
+
+  [tool-call chunk id=call_47be44f19c674200a371a21f0cb6de02 fn=read_file args="{\"path\":\"Cargo.tom"]
+
+  [tool-call chunk id=call_47be44f19c674200a371a21f0cb6de02 fn=read_file args="{\"path\":\"Cargo.toml"]
+
+  [tool-call chunk id=call_47be44f19c674200a371a21f0cb6de02 fn=read_file args="{\"path\":\"Cargo.toml\"}"]
+
+  [end: stop=Some(Completed("completed")) response_id=Some("resp_KPecmEc3stpuNfVq0X7eNP8zIrsWIqbu70M2jqu2Vr-SZ2qTD1p7wDECnDyjMd9_-56YhglbfgFoB1DVD9yhu7QJYFD17Nqa7jeJC9s-7qMAMzcfem_6ShoDgyYatxiCsOwPysFS5PNyyf7RG45o8GUr8ErXgqyArqTNcL7JQt3YLUx19dQY2sqw-Z6UfzV2PUotQp4_5pYQiDZLZOv-UVggQTzQwghAZ2y5k8n59-OUwk18Oqe6PdOdezh18tlZnKGaeoUwh7ueaRov87QWfyuW81If5URWK4Vw9ciI80kV4eatuTBeVlnrmw9f8_AwvMjnADG8RIg5RuY5OQvh4TbxL2Y3aoz_KOiAx_kzbl1nv44e5uasXYtrAsfagoThoL0s1-SM3WaDu_EA3GBmeTLbx8LgSDXeCb4eA2tex3lMWjKNJo4yS5cH8r_3GUd-zVrV") first_token=Some(1.203400377s) total=1.612886231s]
+  [usage: prompt=Some(91) completion=Some(34) reasoning=Some(12)]
+  [captured parts: ["thought_signature", "tool_call"]]
+  -> executing read_file(Cargo.toml) for call_id=call_47be44f19c674200a371a21f0cb6de02
+The project uses:
+
+- **Rust edition:** 2024
+- **Dependencies:**
+  - `ratatui` version `0.30`
+  - `tokio` version `1`, with the `full` feature enabled
+  [end: stop=Some(Completed("completed")) response_id=Some("resp_fhSaiVSMxAcBoGEkSslLRaDGi7i9Kg8RDEz2Rqur-h85a7twzE6qNStSIl7YPHBlpqV-P9_uo0zTgKn-FtOiCpRjALL1YZ7fAw42SIRHz4dfpKufx_GQ7vBbpLsOQPtufADZ2opSwQ03SgVk6-4DtTMtHaerxs9mX34KP9PHWOGBlc--Tr6JJFtBXcsHMvPuir5D335FoexoVkHwA2ZrqyVwCIsOkeqLpQm-lSf0Nb1agd_2vcuDrYyjxnUFVn4iI4s6XWwnlBPatZqe20x2zsvlx-FUWyhqrDHw_EYnSOclFL2uSvmcr3sEdQ0pb1aKhSHbgh-lUdTwEk1WdLoHA1l7VqmGUeslposg5xq3SK2DEExi0Tq4AonR-EytAdn7rYx4x_wAo-xDkSUnMXDctRScjhRwTkyWelLBNnlwh8JC1CrO2_lS-L0t1JeVs6UOsAqR") first_token=Some(2.998293416s) total=3.514372352s]
+  [usage: prompt=Some(187) completion=Some(52) reasoning=None]
+  [captured parts: ["text"]]
+OK tools: final answer after 2 model call(s)

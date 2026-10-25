@@ -1,0 +1,6 @@
+== api=messages model=anthropic/claude-haiku-4-5-20251001 scenario=stream
+The borrow checker uses static analysis to enforce safety rules conservatively—it can't prove all valid programs are safe, so it rejects some that actually are. It lacks information about runtime behavior, like loop bounds or conditional paths that would guarantee memory safety. This is a deliberate trade-off: rejecting valid code is preferable to missing unsound code.
+  [end: stop=Some(Completed("end_turn")) response_id=None first_token=Some(616.834432ms) total=1.675235452s]
+  [usage: prompt=Some(45) completion=Some(77) reasoning=None]
+  [captured parts: ["text"]]
+OK stream in 1.675276229s

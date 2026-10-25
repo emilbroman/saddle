@@ -1,0 +1,32 @@
+== api=messages model=chatgpt/gpt-5.6-luna scenario=tools
+
+  [tool-call chunk id=call_d651ea53c3914ecd8cd22e70d1844fe8 fn=read_file args=""]
+
+  [tool-call chunk id=call_d651ea53c3914ecd8cd22e70d1844fe8 fn=read_file args="{\""]
+
+  [tool-call chunk id=call_d651ea53c3914ecd8cd22e70d1844fe8 fn=read_file args="{\"path"]
+
+  [tool-call chunk id=call_d651ea53c3914ecd8cd22e70d1844fe8 fn=read_file args="{\"path\":\""]
+
+  [tool-call chunk id=call_d651ea53c3914ecd8cd22e70d1844fe8 fn=read_file args="{\"path\":\"Cargo"]
+
+  [tool-call chunk id=call_d651ea53c3914ecd8cd22e70d1844fe8 fn=read_file args="{\"path\":\"Cargo.tom"]
+
+  [tool-call chunk id=call_d651ea53c3914ecd8cd22e70d1844fe8 fn=read_file args="{\"path\":\"Cargo.toml"]
+
+  [tool-call chunk id=call_d651ea53c3914ecd8cd22e70d1844fe8 fn=read_file args="{\"path\":\"Cargo.toml\"}"]
+
+  [end: stop=Some(ToolCall("tool_use")) response_id=None first_token=None total=1.236377927s]
+  [usage: prompt=Some(91) completion=Some(38) reasoning=None]
+  [captured parts: ["tool_call"]]
+  -> executing read_file(Cargo.toml) for call_id=call_d651ea53c3914ecd8cd22e70d1844fe8
+The project uses:
+
+- **Rust edition:** 2024
+- **Dependencies:**
+  - `ratatui = "0.30"`
+  - `tokio = "1"` with the `full` feature enabled
+  [end: stop=Some(Completed("end_turn")) response_id=None first_token=Some(934.728411ms) total=1.285902711s]
+  [usage: prompt=Some(173) completion=Some(50) reasoning=None]
+  [captured parts: ["text"]]
+OK tools: final answer after 2 model call(s)

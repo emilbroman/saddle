@@ -1,0 +1,23 @@
+== api=responses model=anthropic/claude-haiku-4-5-20251001 scenario=tools
+I'll read the Cargo.toml file to check the Rust edition and dependencies.
+  [tool-call chunk id=toolu_01SWMUPZdWw48hcgGahMY74n fn=read_file args="{\"path\""]
+
+  [tool-call chunk id=toolu_01SWMUPZdWw48hcgGahMY74n fn=read_file args="{\"path\": \"Carg"]
+
+  [tool-call chunk id=toolu_01SWMUPZdWw48hcgGahMY74n fn=read_file args="{\"path\": \"Cargo.toml\"}"]
+
+  [end: stop=Some(Completed("completed")) response_id=Some("resp_vfdfkKq565dT5pJO5MMmLnc0QPfnE7Fk8SdZPD7_uWzBJ6E5Ko-VkD7HndQQgodgWS0rBThU_yuUT_jQcKXIQeIPePFr_SVfnHYsppiNCrfC_FQ-e_7jB74oQIcv9dnkgLE9FOWSpDTTMSLO-zgeFGNQi6jwhjvXwvKX55kI05A0-iDeqKJzXQeAU_Qds-_ZTaTZWnJF7lL5OdKDm9TEqWEBKqhiiP4XrBdfGxvjBV0EpF05R0E4nWNelhJXWmmVgg7jvldOPiBCUa0lEej_VNALtKi4xlAkPvlT3TqVQPkyPMiDbiiY6-6YUU-4oe0dWW8biJe0rGlC0uf0aA_6YobNYWvAMDgvZkjj6A0a3ubr2v6HTFfEthOXpFbT28Vt7E5NYagizKYkSXhiXCbRZloceGHEj01FuTmrbvvVrmEzk0TlCuhbUJeEAw==") first_token=Some(699.59074ms) total=1.082489417s]
+  [usage: prompt=Some(608) completion=Some(77) reasoning=None]
+  [captured parts: ["text", "tool_call"]]
+  -> executing read_file(Cargo.toml) for call_id=toolu_01SWMUPZdWw48hcgGahMY74n
+Based on the Cargo.toml file, here's what this project uses:
+
+**Rust Edition:** `2024`
+
+**Dependencies:**
+1. **ratatui** - version `0.30`
+2. **tokio** - version `1` with the `"full"` features enabled
+  [end: stop=Some(Completed("completed")) response_id=Some("resp_5dLl_dFV7tD7i-jmAWfRt50Phyw-5f6U_ZWdZvyw7RWuijo9nyrLGoRCapLCv7uNXOHUnRvfwS6cWmcejcdLSs1Em4WLCn3MVIyES0nYP5ZV2SIbgVy8QPPsjOg5MH0OeZrA7RQxwU7nlTBK22PX8fc0iUGY2mhqxF6ZfffsgXhl5_XIHgSvHwTx4CMyqULXFOrhv_rX0Nm33WsLN9DqhdJGDqmlw4_PN2RZUVqW7PUlfCoW9CBwGXIKb7Do9jS-4ups8ZsLOgkuSKYfvG7QJor4LruPHzPTeKYdGMDDzfMuO8v8incjrpyD0QnbZ-7Qm-68I6TpPfnpqtOXC2KiSRG1nYRzT54xIywXgpXOPApXbznFh1d7fbGPZHTNskzBRIp7XBf5Q30cDt9ppnBx6_IpJq3xMhYTGx5-ndnr9XWjDnZOSr-4VRhyvQ==") first_token=Some(545.004617ms) total=1.051488644s]
+  [usage: prompt=Some(754) completion=Some(70) reasoning=None]
+  [captured parts: ["text"]]
+OK tools: final answer after 2 model call(s)

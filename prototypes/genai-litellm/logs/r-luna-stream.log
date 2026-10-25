@@ -1,0 +1,8 @@
+== api=responses model=chatgpt/gpt-5.6-luna scenario=stream
+[2m**Explaining approximation and false positives**[0mA borrow checker uses conservative rules to prove safety without running the program.  
+Those rules cannot always recognize every safe control-flow pattern.  
+Therefore, it may reject code that is actually memory safe.
+  [end: stop=Some(Completed("completed")) response_id=Some("resp_eRmGbv20Lhu7IHLwRacz-TLRyfhGsB8Jt00LtC_wTh8F8GFtqWPDkzWIvBe9xup9ZuxpQmJ462vVayjwbuDFv923a-3A0AgjpJ5V2mv-y6QraVjsEMNNSTf1GPiVRtL-Cce4Wjx-5hI5Yag3I3enZKqzwCYSdY-iYdW9i8s0mE5XeFrZ7ND3Y_6XLc9jQqTlSHZLaqN98QdVT0Za3fHuwSoKQ5bd8kI_It9N0s_XQUDGkfUn4JNHm24xtFEogz4BHPxvxZLZAdJ-zO9dJ2FN7m3deTP8Dt_ocuPT1hV9mrJI47tmX53OrZYWNFmjoHnKUVh5l81K1VFLfkx5CIWkUoD9mczGhAYnlMGx6qCL5yNvt_IUCuz3LtjeFQkSj_XntKuQFQnbgTYI3UGFu3_nPyKMc40dJtORNhxwadnGEfoPyi_zIehhwRlgwgQwpoCg_Sqi") first_token=Some(1.779273633s) total=1.906318066s]
+  [usage: prompt=Some(32) completion=Some(69) reasoning=Some(24)]
+  [captured parts: ["thought_signature", "text"]]
+OK stream in 1.90637402s

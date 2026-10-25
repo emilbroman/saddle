@@ -1,0 +1,28 @@
+== api=responses model=melious/glm-5.3 scenario=tools
+[2mLet m[0m[2me rea[0m[2md Car[0m[2mgo.to[0m[2mml.[0m
+  [tool-call chunk id=call_e8a48cdf4a0f4e67bbd945ac fn=read_file args="{\"pat"]
+
+  [tool-call chunk id=call_e8a48cdf4a0f4e67bbd945ac fn=read_file args="{\"path\": \""]
+
+  [tool-call chunk id=call_e8a48cdf4a0f4e67bbd945ac fn=read_file args="{\"path\": \"Cargo"]
+
+  [tool-call chunk id=call_e8a48cdf4a0f4e67bbd945ac fn=read_file args="{\"path\": \"Cargo.toml"]
+
+  [tool-call chunk id=call_e8a48cdf4a0f4e67bbd945ac fn=read_file args="{\"path\": \"Cargo.toml\"}"]
+
+  [end: stop=Some(Completed("completed")) response_id=Some("resp_wUMRIu3J-c3DVId0184dIglmG8eWVxU1djjAGncnS3ppD2Rz6EUqlkhsHhEw9sXY_bjeuFxoAYEw-jQj2lcPU-DYSxOrIveWmIuDj9vWr0Hu5Uv4ikn0z2LYGDohxk9Q627Gaq8s5iiXbOXwYspuEK6vogU4QTlB4Qyp0IUc2PmCSAQn534V") first_token=Some(358.504694ms) total=358.755873ms]
+  [usage: prompt=Some(202) completion=Some(21) reasoning=Some(8)]
+  [captured parts: ["tool_call"]]
+  -> executing read_file(Cargo.toml) for call_id=call_e8a48cdf4a0f4e67bbd945ac
+This project uses:
+
+- **Rust edition:** 2024
+- **Dependencies:**
+  - `ratatui = "0.30"` — a TUI framework (no extra features enabled)
+  - `tokio = { version = "1", features = ["full"] }` — async runtime with all features enabled
+
+The package itself is named `saddle` at version 0.0.1.
+  [end: stop=Some(Completed("completed")) response_id=Some("resp_bVYTMW4IsKowtm6EOsR6bl_pAphW4ozYEj2izYiJVjqB0MNsN4bXyqYc20OPn_ljukMw9o1w6vlCdBlXcp-Jup2mEDFqT2kxzdEaNy0xZr5tQSdW4zUtMEGBhAdAj0YGl9eFlkbVp2z3SH1T8HpZVr7wJ8kDQdGmFaKP9tswf5ByeVDZ5WOl") first_token=Some(946.663148ms) total=947.088855ms]
+  [usage: prompt=Some(271) completion=Some(89) reasoning=Some(1)]
+  [captured parts: ["text"]]
+OK tools: final answer after 2 model call(s)

@@ -4,8 +4,13 @@ use std::process::ExitCode;
 use anyhow::Context;
 use crossterm::event::EventStream;
 
+use std::sync::Arc;
+
+use saddle::agent::{Agent, AgentHandle};
 use saddle::app::{self, App, Status};
-use saddle::{config, events, project, tui};
+use saddle::provider::GenaiProvider;
+use saddle::tools::{ProjectFs, Registry};
+use saddle::{config, events, project, prompt, tui};
 
 #[tokio::main]
 async fn main() -> ExitCode {
@@ -47,7 +52,17 @@ async fn run() -> anyhow::Result<()> {
         api: loaded.config.api.to_string(),
         sandbox: "not available".into(),
     };
+    let provider = GenaiProvider::new(&loaded.config, &loaded.credentials, home.as_deref())
+        .context("cannot set up the inference client")?;
+    let fs = ProjectFs::new(&project_root)
+        .with_context(|| format!("cannot open project root {}", project_root.display()))?;
     let (senders, receivers) = events::channels();
+    let agent = Agent::new(
+        Arc::new(provider),
+        Registry::read_only(fs),
+        prompt::system(&project_root),
+        senders.agent.clone(),
+    );
     let mut app = App::new(
         loaded.config,
         loaded.credentials,
@@ -55,6 +70,7 @@ async fn run() -> anyhow::Result<()> {
         status,
         senders,
     );
+    app.attach_agent(AgentHandle::spawn(agent));
 
     let (mut terminal, guard) = tui::init().context("cannot initialise the terminal")?;
     let result = app::run(&mut terminal, &mut app, EventStream::new(), receivers).await;

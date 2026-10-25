@@ -58,6 +58,8 @@ struct Item {
 #[derive(Debug, Default)]
 pub struct Transcript {
     items: Vec<Item>,
+    /// Show tool calls and results in full instead of collapsed.
+    expanded: bool,
 }
 
 impl Transcript {
@@ -74,6 +76,18 @@ impl Transcript {
 
     pub fn is_empty(&self) -> bool {
         self.items.is_empty()
+    }
+
+    pub fn toggle_expanded(&mut self) {
+        self.expanded = !self.expanded;
+        for item in &mut self.items {
+            if matches!(
+                item.entry,
+                Entry::ToolCall { .. } | Entry::ToolResult { .. }
+            ) {
+                item.layout = None;
+            }
+        }
     }
 
     /// Appends streamed text to the trailing in-progress assistant entry,
@@ -114,9 +128,10 @@ impl Transcript {
     /// Total number of rendered lines at `width` columns.
     pub fn line_count(&mut self, width: u16) -> usize {
         let width = usize::from(width);
+        let expanded = self.expanded;
         self.items
             .iter_mut()
-            .map(|item| item.lines(width).len())
+            .map(|item| item.lines(width, expanded).len())
             .sum()
     }
 
@@ -125,8 +140,9 @@ impl Transcript {
         let width = usize::from(width);
         let mut out = Vec::with_capacity(range.len());
         let mut offset = 0;
+        let expanded = self.expanded;
         for item in &mut self.items {
-            let lines = item.lines(width);
+            let lines = item.lines(width, expanded);
             let item_range = offset..offset + lines.len();
             offset = item_range.end;
             if item_range.end <= range.start {
@@ -144,9 +160,9 @@ impl Transcript {
 }
 
 impl Item {
-    fn lines(&mut self, width: usize) -> &[Line<'static>] {
+    fn lines(&mut self, width: usize, expanded: bool) -> &[Line<'static>] {
         if self.layout.as_ref().is_none_or(|(w, _)| *w != width) {
-            self.layout = Some((width, layout_entry(&self.entry, width)));
+            self.layout = Some((width, layout_entry(&self.entry, width, expanded)));
         }
         &self.layout.as_ref().unwrap().1
     }
@@ -154,7 +170,7 @@ impl Item {
 
 /// Every entry is preceded by a blank separator line and rendered with a
 /// two-column gutter whose first row carries the entry's marker.
-fn layout_entry(entry: &Entry, width: usize) -> Vec<Line<'static>> {
+fn layout_entry(entry: &Entry, width: usize, expanded: bool) -> Vec<Line<'static>> {
     let body_width = width.saturating_sub(GUTTER).max(1);
     let dim = Style::new().add_modifier(Modifier::DIM);
 
@@ -215,12 +231,12 @@ fn layout_entry(entry: &Entry, width: usize) -> Vec<Line<'static>> {
         }
     };
 
-    if let Some(max) = max_rows
+    if let Some(max) = max_rows.filter(|_| !expanded)
         && rows.len() > max
     {
         let hidden = rows.len() - (max - 1);
         rows.truncate(max - 1);
-        rows.push(format!("… {hidden} more lines"));
+        rows.push(format!("… {hidden} more lines (Ctrl+O to expand)"));
     }
 
     let mut lines = Vec::with_capacity(rows.len() + 1);
@@ -426,7 +442,12 @@ mod tests {
         assert_eq!(total, 1 + TOOL_RESULT_MAX_LINES);
         let lines = text(&t.lines(40, 0..total));
         assert_eq!(lines[1], "↳ 1");
-        assert_eq!(lines.last().unwrap(), "  … 5 more lines");
+        assert_eq!(lines.last().unwrap(), "  … 5 more lines (Ctrl+O to expand)");
+
+        t.toggle_expanded();
+        assert_eq!(t.line_count(40), 11);
+        t.toggle_expanded();
+        assert_eq!(t.line_count(40), total);
     }
 
     #[test]

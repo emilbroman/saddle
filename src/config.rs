@@ -12,9 +12,9 @@ use serde::Deserialize;
 pub const CONFIG_FILE: &str = "config.toml";
 pub const CREDENTIALS_FILE: &str = "credentials.toml";
 
-const CONFIG_EXAMPLE: &str = r#"model = "claude-sonnet-4-5"
+const CONFIG_EXAMPLE: &str = r#"model = "anthropic/claude-sonnet-4-6"
 api = "messages"            # or "responses"
-base_url = "https://litellm.example.internal""#;
+base_url = "https://litellm.bb3.internal/v1/""#;
 
 const CREDENTIALS_EXAMPLE: &str = r#"[inference]
 api_key = "sk-...""#;
@@ -91,6 +91,15 @@ pub struct Config {
     pub model: String,
     pub api: ApiFamily,
     pub base_url: String,
+    /// Output token limit per model response.
+    #[serde(default = "default_max_tokens")]
+    pub max_tokens: u32,
+    /// Reasoning effort keyword (`low`, `medium`, `high`, …) or a token budget.
+    #[serde(default)]
+    pub reasoning_effort: Option<String>,
+    /// Extra PEM trust anchor for the inference endpoint, on top of the system store.
+    #[serde(default)]
+    pub ca_file: Option<String>,
     #[serde(default)]
     pub lsp: BTreeMap<String, LspServer>,
     #[serde(default)]
@@ -132,6 +141,10 @@ impl Default for SandboxConfig {
             projects: BTreeMap::new(),
         }
     }
+}
+
+fn default_max_tokens() -> u32 {
+    16_384
 }
 
 fn default_global_writable() -> Vec<String> {
@@ -200,6 +213,16 @@ impl Config {
             return Err(format!(
                 "`base_url` must start with https:// or http:// (got {:?})",
                 self.base_url
+            ));
+        }
+        if self.max_tokens == 0 {
+            return Err("`max_tokens` must be positive".into());
+        }
+        if let Some(effort) = &self.reasoning_effort
+            && effort.parse::<genai::chat::ReasoningEffort>().is_err()
+        {
+            return Err(format!(
+                "`reasoning_effort` must be one of none, minimal, low, medium, high, xhigh, max or a token budget (got {effort:?})"
             ));
         }
         for (language, server) in &self.lsp {
@@ -402,6 +425,9 @@ mod tests {
 model = "claude-sonnet-4-5"
 api = "responses"
 base_url = "https://litellm.bb3.internal"
+max_tokens = 4096
+reasoning_effort = "medium"
+ca_file = "~/.config/saddle/ca.pem"
 
 [lsp.rust]
 command = "rust-analyzer"
@@ -429,6 +455,9 @@ num_results = 8
         assert_eq!(config.model, "claude-sonnet-4-5");
         assert_eq!(config.api, ApiFamily::Responses);
         assert_eq!(config.base_url, "https://litellm.bb3.internal");
+        assert_eq!(config.max_tokens, 4096);
+        assert_eq!(config.reasoning_effort.as_deref(), Some("medium"));
+        assert_eq!(config.ca_file.as_deref(), Some("~/.config/saddle/ca.pem"));
         let rust = &config.lsp["rust"];
         assert_eq!(rust.command, "rust-analyzer");
         assert!(rust.args.is_empty());
@@ -449,6 +478,8 @@ num_results = 8
     fn minimal_config_uses_defaults() {
         let config = Config::parse(CONFIG_EXAMPLE, &p()).unwrap();
         assert_eq!(config.api, ApiFamily::Messages);
+        assert_eq!(config.max_tokens, 16_384);
+        assert_eq!(config.reasoning_effort, None);
         assert!(config.lsp.is_empty());
         assert_eq!(config.sandbox, SandboxConfig::default());
         assert_eq!(config.batching, BatchingConfig::default());
@@ -489,7 +520,15 @@ num_results = 8
     fn semantic_validation() {
         let cases = [
             (CONFIG_EXAMPLE.replace("https://", "ftp://"), "base_url"),
-            (CONFIG_EXAMPLE.replace("claude-sonnet-4-5", " "), "model"),
+            (
+                CONFIG_EXAMPLE.replace("anthropic/claude-sonnet-4-6", " "),
+                "model",
+            ),
+            (format!("{CONFIG_EXAMPLE}\nmax_tokens = 0\n"), "max_tokens"),
+            (
+                format!("{CONFIG_EXAMPLE}\nreasoning_effort = \"lots\"\n"),
+                "reasoning_effort",
+            ),
             (
                 format!("{CONFIG_EXAMPLE}\n[lsp.rust]\ncommand = \"ra\"\nfile_types = []\n"),
                 "lsp.rust.file_types",
@@ -573,7 +612,7 @@ num_results = 8
 
         std::fs::write(dir.path().join(CREDENTIALS_FILE), CREDENTIALS_EXAMPLE).unwrap();
         let loaded = load_from(dir.path()).unwrap();
-        assert_eq!(loaded.config.model, "claude-sonnet-4-5");
+        assert_eq!(loaded.config.model, "anthropic/claude-sonnet-4-6");
     }
 
     #[test]

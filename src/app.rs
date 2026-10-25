@@ -9,8 +9,9 @@ use ratatui::style::{Modifier, Style};
 use ratatui::widgets::Block;
 use ratatui_textarea::{TextArea, WrapMode};
 
+use crate::agent::AgentHandle;
 use crate::config::{Config, Credentials};
-use crate::events::{AgentEvent, EventReceivers, EventSenders, FsEvent, JobEvent};
+use crate::events::{AgentEvent, EventReceivers, EventSenders, FsEvent, JobEvent, TurnOutcome};
 use crate::transcript::{Entry, NoticeLevel, Scroll, StreamState, Transcript};
 use crate::ui;
 
@@ -23,12 +24,23 @@ pub struct Status {
     pub sandbox: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Activity {
+    Idle,
+    /// A turn is running.
+    Working,
+    /// A turn is running and the model is reasoning.
+    Thinking,
+}
+
 pub struct App {
     pub config: Config,
     pub credentials: Credentials,
     pub project_root: PathBuf,
     pub senders: EventSenders,
     pub status: Status,
+    pub agent: Option<AgentHandle>,
+    pub activity: Activity,
     pub transcript: Transcript,
     pub scroll: Scroll,
     pub input: TextArea<'static>,
@@ -51,11 +63,30 @@ impl App {
             project_root,
             senders,
             status,
+            agent: None,
+            activity: Activity::Idle,
             transcript: Transcript::default(),
             scroll: Scroll::default(),
             input: new_input(),
             should_quit: false,
             transcript_metrics: (0, 0),
+        }
+    }
+
+    pub fn attach_agent(&mut self, agent: AgentHandle) {
+        self.agent = Some(agent);
+    }
+
+    pub fn is_busy(&self) -> bool {
+        self.activity != Activity::Idle
+    }
+
+    /// Stops the running turn, if any. Also the hook for file-change batching.
+    pub fn interrupt(&mut self) {
+        if self.is_busy()
+            && let Some(agent) = &self.agent
+        {
+            agent.interrupt();
         }
     }
 
@@ -79,6 +110,8 @@ impl App {
 
         match key.code {
             KeyCode::Char('c') if ctrl => self.should_quit = true,
+            KeyCode::Esc => self.interrupt(),
+            KeyCode::Char('o') if ctrl => self.transcript.toggle_expanded(),
             KeyCode::Enter if shift || alt => self.input.insert_newline(),
             KeyCode::Char('j') if ctrl => self.input.insert_newline(),
             KeyCode::Enter => self.submit(),
@@ -96,21 +129,43 @@ impl App {
 
     fn submit(&mut self) {
         let text = self.input.lines().join("\n");
-        if text.trim().is_empty() {
+        // While a turn runs the draft stays in the input; Esc interrupts.
+        if text.trim().is_empty() || self.is_busy() {
             return;
         }
         self.input = new_input();
-        self.transcript.push(Entry::User { text });
-        self.transcript.push(Entry::Notice {
-            text: "No agent is connected yet.".into(),
-            level: NoticeLevel::Info,
-        });
+        self.transcript.push(Entry::User { text: text.clone() });
+        match &self.agent {
+            Some(agent) => {
+                agent.send(text);
+                self.activity = Activity::Working;
+            }
+            None => self.transcript.push(Entry::Notice {
+                text: "No agent is connected.".into(),
+                level: NoticeLevel::Error,
+            }),
+        }
         self.scroll.bottom();
     }
 
     pub fn handle_agent_event(&mut self, event: AgentEvent) {
         match event {
-            AgentEvent::AssistantDelta(delta) => self.transcript.append_assistant(&delta),
+            AgentEvent::TurnStarted => self.activity = Activity::Working,
+            AgentEvent::TurnFinished(outcome) => {
+                self.activity = Activity::Idle;
+                self.transcript.finish_assistant(StreamState::Interrupted);
+                if outcome == TurnOutcome::Interrupted {
+                    self.transcript.push(Entry::Notice {
+                        text: "Interrupted.".into(),
+                        level: NoticeLevel::Info,
+                    });
+                }
+            }
+            AgentEvent::Thinking => self.activity = Activity::Thinking,
+            AgentEvent::AssistantDelta(delta) => {
+                self.activity = Activity::Working;
+                self.transcript.append_assistant(&delta)
+            }
             AgentEvent::AssistantDone { interrupted } => {
                 self.transcript.finish_assistant(if interrupted {
                     StreamState::Interrupted
@@ -130,6 +185,10 @@ impl App {
                 call_id,
                 output,
                 is_error,
+            }),
+            AgentEvent::Notice(text) => self.transcript.push(Entry::Notice {
+                text,
+                level: NoticeLevel::Info,
             }),
             AgentEvent::Error(text) => {
                 self.transcript.finish_assistant(StreamState::Interrupted);
@@ -197,7 +256,13 @@ where
                 Some(event) => app.handle_terminal_event(event?),
                 None => return Ok(()),
             },
-            Some(event) = events.agent.recv() => app.handle_agent_event(event),
+            Some(event) = events.agent.recv() => {
+                app.handle_agent_event(event);
+                // Coalesce a burst of streamed deltas into one redraw.
+                while let Ok(event) = events.agent.try_recv() {
+                    app.handle_agent_event(event);
+                }
+            }
             Some(event) = events.fs.recv() => app.handle_fs_event(event),
             Some(event) = events.job.recv() => app.handle_job_event(event),
         }

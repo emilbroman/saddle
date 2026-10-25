@@ -237,3 +237,41 @@ fn transcript_delta_replay_is_exact_and_collapsed() {
     let transcript = Transcript::restore(restored.ui);
     assert_eq!(transcript.entries().cloned().collect::<Vec<_>>(), expected);
 }
+
+#[tokio::test]
+async fn resume_diagnostics_and_lost_jobs_share_one_request() {
+    use saddle::watch::{ChangeKind, ChangeSet, Detail, FileChange};
+    let root = tempfile::tempdir().unwrap();
+    let data = tempfile::tempdir().unwrap();
+    let provider = ScriptedProvider::new([vec![text("Noted.")]]);
+    let (mut app, mut events) = application(root.path(), data.path(), provider.clone());
+    app.resume(
+        ChangeSet {
+            files: vec![FileChange {
+                path: root.path().join("new.rs"),
+                display: "new.rs".into(),
+                kind: ChangeKind::Created,
+                detail: Detail::Unseen { size: 20 },
+            }],
+            diagnostics: Some("<diagnostic-changes>new: type error</diagnostic-changes>".into()),
+        },
+        BTreeMap::from([(4, "cargo test".into())]),
+    );
+    finish(&mut app, &mut events).await;
+    {
+        let requests = provider.requests.lock().unwrap();
+        assert_eq!(requests.len(), 1);
+        let input = requests[0]
+            .messages
+            .last()
+            .unwrap()
+            .content
+            .first_text()
+            .unwrap();
+        assert!(
+            input.contains("new.rs") && input.contains("type error") && input.contains("job 4")
+        );
+    }
+    assert!(app.transcript.entries().any(|e| matches!(e, Entry::FilesChanged {details, ..} if details.iter().any(|s| s.contains("type error")))));
+    app.agent.as_ref().unwrap().shutdown().await;
+}

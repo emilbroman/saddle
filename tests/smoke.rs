@@ -518,6 +518,8 @@ async fn diagnostic_wait_interrupts_now_and_delivers_only_the_combined_message()
     let diagnostics =
         "<diagnostic-changes>\nnew: a.rs:1:1 Error: mismatched types\n</diagnostic-changes>";
     app.handle_fs_event(FsEvent::Changed(Arc::new(ChangeSet {
+        git: Vec::new(),
+        sync_paths: Vec::new(),
         files: vec![FileChange {
             path: "/src/project/a.rs".into(),
             display: "a.rs".into(),

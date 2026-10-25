@@ -4,11 +4,13 @@
 
 use std::collections::BTreeSet;
 use std::path::PathBuf;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct Batch {
     pub paths: BTreeSet<PathBuf>,
+    pub git_paths: BTreeSet<PathBuf>,
+    pub window: Option<(SystemTime, SystemTime)>,
     /// The OS dropped events; the whole project must be compared against what
     /// Saddle last knew.
     pub rescan: bool,
@@ -16,7 +18,7 @@ pub struct Batch {
 
 impl Batch {
     pub fn is_empty(&self) -> bool {
-        self.paths.is_empty() && !self.rescan
+        self.paths.is_empty() && self.git_paths.is_empty() && !self.rescan
     }
 }
 
@@ -26,6 +28,7 @@ pub struct Batcher {
     max_window: Duration,
     /// When the open batch received its first and latest change.
     window: Option<(Instant, Instant)>,
+    occurred: Option<Instant>,
     batch: Batch,
 }
 
@@ -35,6 +38,7 @@ impl Batcher {
             quiet,
             max_window,
             window: None,
+            occurred: None,
             batch: Batch::default(),
         }
     }
@@ -44,9 +48,18 @@ impl Batcher {
         self.touch(now);
     }
 
+    pub fn add_git(&mut self, path: PathBuf, now: Instant) {
+        self.batch.git_paths.insert(path);
+        self.touch(now);
+    }
+
     pub fn add_rescan(&mut self, now: Instant) {
         self.batch.rescan = true;
         self.touch(now);
+    }
+
+    pub fn note_occurred(&mut self, at: Instant) {
+        self.occurred = Some(self.occurred.map_or(at, |old| old.min(at)));
     }
 
     fn touch(&mut self, now: Instant) {
@@ -65,7 +78,10 @@ impl Batcher {
         if self.deadline()? > now {
             return None;
         }
-        self.window = None;
+        let (first, _) = self.window.take().unwrap();
+        let first = self.occurred.take().map_or(first, |at| at.min(first));
+        let end = SystemTime::now();
+        self.batch.window = Some((end - now.saturating_duration_since(first), end));
         Some(std::mem::take(&mut self.batch))
     }
 }
@@ -152,6 +168,23 @@ mod tests {
         b.add("a".into(), t0);
         b.add("a".into(), t0 + ms(1900));
         assert_eq!(b.deadline(), Some(t0 + Duration::from_secs(2)));
+    }
+
+    #[test]
+    fn metadata_shares_batch_without_using_stale_debounce_times_for_quiet_period() {
+        let start = Instant::now();
+        let mut b = Batcher::new(QUIET, MAX);
+        b.add("a".into(), start);
+        b.note_occurred(start - ms(100));
+        b.add_git(".git/HEAD".into(), start + ms(800));
+        b.note_occurred(start); // Deduplicated OS events can retain an older timestamp.
+        assert_eq!(b.deadline(), Some(start + ms(1800)));
+        assert!(b.take_due(start + ms(1000)).is_none());
+        let batch = b.take_due(start + ms(1800)).unwrap();
+        assert_eq!(paths(&batch), ["a"]);
+        assert_eq!(batch.git_paths.len(), 1);
+        assert!(!batch.is_empty());
+        assert!(batch.window.is_some());
     }
 
     #[test]

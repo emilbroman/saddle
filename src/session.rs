@@ -235,6 +235,33 @@ impl Session {
         Ok(())
     }
 
+    pub fn git_state(&self) -> crate::git::GitState {
+        let inner = self.inner.lock().unwrap();
+        crate::git::GitState {
+            per_branch: inner.state.per_branch.clone(),
+            branch: inner.state.branch.clone(),
+            head: inner.state.head.clone(),
+        }
+    }
+
+    pub fn generation(&self) -> String {
+        self.inner.lock().unwrap().generation.clone()
+    }
+
+    pub fn save_git(&self, git: crate::git::GitState, generation: &str) -> Result<()> {
+        let mut inner = self.inner.lock().unwrap();
+        if inner.generation != generation {
+            return Ok(());
+        }
+        let mut state = inner.state.clone();
+        state.per_branch = git.per_branch;
+        state.branch = git.branch;
+        state.head = git.head;
+        self.write_state(&inner.generation, &state)?;
+        inner.state = state;
+        Ok(())
+    }
+
     fn write_state(&self, generation: &str, state: &PersistedState) -> Result<()> {
         let bytes = encode(&StateFile {
             generation: generation.to_owned(),

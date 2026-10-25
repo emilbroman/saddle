@@ -29,7 +29,7 @@ worktree containing it. It is shown in the status line.
 | ------------------------------------- | ------------------------------- |
 | Enter                                 | Send message                    |
 | Esc                                   | Interrupt the running turn      |
-| Ctrl+O                                | Expand / collapse tool output   |
+| Ctrl+O                                | Expand / collapse tools and events |
 | Shift+Enter, Alt+Enter, Ctrl+J        | Insert newline                  |
 | PageUp / PageDown                     | Scroll transcript by a page     |
 | Shift+Up / Shift+Down                 | Scroll transcript by a line     |
@@ -85,11 +85,45 @@ agent can query late results with `lsp_diagnostics`. With no language servers
 configured, there is no extra wait. These timings do not change the watcher
 batching defaults above.
 
-Ignored files are never reported: `.git`, anything matched by `.gitignore`,
+Ignored files are never reported as file changes: `.git`, anything matched by `.gitignore`,
 `.ignore`, `.git/info/exclude` or the global git excludes file, and the
 sandbox's writable carve-outs (such as `target/`). On Linux each reportable
 directory gets its own inotify watch, so ignored trees cost none; on macOS one
-FSEvents stream covers the project.
+FSEvents stream covers the project. Git metadata is watched separately to detect
+repository movements, including in linked worktrees.
+
+### Git movements
+
+Git gestures are automatic events, separate from saved-file diffs. The transcript
+shows a compact `⎇` headline; Ctrl+O expands the full event the agent receives.
+The first launch in a worktree, and `/new`, give a brief orientation: branch,
+HEAD short hash and subject (or explicitly no repository outside Git).
+
+Branch switches, pulls and commits made while Saddle was closed report commits
+this session has not seen: `short-hash  author  subject` plus an aggregate file
+stat, not patches. The commit list is capped, with the omitted count shown. Tips
+are tracked per branch. For a branch not visited in this session, the range starts
+at its merge-base with the default branch: `origin/HEAD`, falling back to `main`
+or `master`, or the optional `[git] default_branch` override. Detached HEAD is
+identified by hash. Rebase, amend and reset report rewritten history when the
+previous tip is no longer reachable.
+
+A live commit is classified as your own when its committer email matches the
+repository's `user.email` and its committer timestamp falls within the change
+batch's time window. This is a heuristic, not identity verification. Commits made
+while Saddle was closed count as unseen, even if their email matches. The agent
+briefly reviews your live commits by default; other gestures get a brief,
+relevant reaction and may use `no_comment` when there is nothing worth saying.
+
+When git metadata changes with a file batch, files now equal to the new HEAD
+blob are folded into the git event and their snapshots updated silently. Files
+still different from HEAD remain ordinary change events in the same wake-up, so
+a checkout with dirty files does not hide those edits. Restoring files to HEAD
+without moving HEAD (for example `git checkout -- <file>`, stash or reset)
+reports a working-tree-reverted event with the affected paths. Git events
+interrupt an active agent turn just like saved changes.
+
+Git metadata watching on macOS remains pending user verification.
 
 Shift+Enter needs a terminal that supports the kitty keyboard protocol (kitty,
 WezTerm, Ghostty, recent iTerm2); elsewhere use Alt+Enter or Ctrl+J. Other keys
@@ -106,16 +140,17 @@ session; different worktrees have independent conversations. A lock refuses a
 second Saddle instance on the same worktree.
 
 Reopening restores the full transcript, scrolled to the end, with ordinary tool
-results collapsed and shell results showing their tail preview. If nothing changed, resume is silent: no agent turn starts. Edits made
-while Saddle was closed are reported as diffs against the last content Saddle
-observed. Files whose current content matches `HEAD` are folded silently into
-the snapshots; git-movement notifications are a follow-up feature, not yet
-available. Shell jobs do not survive exit or restart; pending restored job
-handles are reported as lost when resuming.
+results collapsed, shell results showing their tail preview and git events
+showing compact headlines. If nothing changed, resume is silent: no agent turn
+starts. Edits made while Saddle was closed are reported as diffs against the
+last content Saddle observed. Files whose current content matches `HEAD` are
+folded silently into the snapshots. Git movements, remaining file changes and
+lost shell jobs are combined into one resume wake-up. Shell jobs do not survive
+exit or restart; pending restored job handles are reported as lost when resuming.
 
 Send `/new` to archive the current log and start an empty conversation, resetting
-the file snapshots and saved git state. This command is idle-only: press Esc
-first if a turn is running. Archives stay on disk, but cannot be browsed or
+the file snapshots and saved git state, then sending a fresh first-launch git
+orientation. This command is idle-only: press Esc first if a turn is running. Archives stay on disk, but cannot be browsed or
 resumed in Saddle yet.
 
 The status line shows the last request's provider-reported prompt tokens over
@@ -178,6 +213,10 @@ diagnostics_max_wait_ms = 5000           # cap on the extra diagnostics wait (de
 [search]                                 # web search via Exa
 enabled = true                           # default true; needs an Exa key
 num_results = 5                          # results per search unless the agent asks; 1–10, default 5
+
+[git]
+# Optional override; otherwise origin/HEAD, then main/master are detected.
+# default_branch = "develop"
 ```
 
 The adapter is chosen by `api`, never inferred from the model name. Against
@@ -366,8 +405,8 @@ A single crate with a library (`src/lib.rs`) and a thin binary (`src/main.rs`):
 - `project` — project-root resolution.
 - `session` — durable per-worktree event log, instance lock and resume state.
 - `context` — request-only leading truncation against the configured token budget.
-- `transcript` — the conversation model (user, assistant, tool call/result and
-  notice entries), its wrapped layout and the transcript scroll state.
+- `transcript` — the conversation model (user, assistant, tool call/result,
+  notice, saved-change and git-event entries), its wrapped layout and scroll state.
 - `events` — channels for agent, filesystem, job and language-server events.
 - `agent` — the conversation and its turn loop (stream, run tool calls, feed
   results back, repeat), on its own task behind `AgentHandle`, which also

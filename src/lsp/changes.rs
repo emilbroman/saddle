@@ -39,7 +39,9 @@ pub async fn forward(
         }
         let before = lsp.diagnostics();
         let mut files = first.files.clone();
-        lsp.did_change(files.iter().map(|f| f.path.clone()).collect());
+        let mut git = first.git.clone();
+        let mut sync_paths = first.sync_paths.clone();
+        lsp.did_change(first.changed_paths());
         let settled = lsp.settle(quiet, cap);
         tokio::pin!(settled);
         let settled = loop {
@@ -48,8 +50,10 @@ pub async fn forward(
                 result = &mut settled => break result,
                 next = incoming.recv() => match next {
                     Some(FsEvent::Changed(set)) => {
-                        lsp.did_change(set.files.iter().map(|f| f.path.clone()).collect());
+                        lsp.did_change(set.changed_paths());
                         files.extend(set.files.iter().cloned());
+                        git.extend(set.git.iter().cloned());
+                        sync_paths.extend(set.sync_paths.iter().cloned());
                     }
                     Some(event) => { let _ = outgoing.send(event); }
                     None => break settled.await,
@@ -68,6 +72,8 @@ pub async fn forward(
         }
         let set = Arc::new(ChangeSet {
             files,
+            git,
+            sync_paths,
             diagnostics: Some(diagnostics),
         });
         if outgoing.send(FsEvent::Changed(set)).is_err() {

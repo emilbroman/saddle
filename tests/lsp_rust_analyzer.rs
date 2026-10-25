@@ -195,6 +195,8 @@ async fn rust_analyzer_on_saddle() {
     let started = Instant::now();
     changes_tx
         .send(FsEvent::Changed(Arc::new(ChangeSet {
+            git: Vec::new(),
+            sync_paths: Vec::new(),
             files: vec![FileChange {
                 path: broken.clone(),
                 display: "src/prompt.rs".into(),

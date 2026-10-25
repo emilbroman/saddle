@@ -52,6 +52,10 @@ pub enum Entry {
         text: String,
         level: NoticeLevel,
     },
+    GitEvent {
+        headline: String,
+        text: String,
+    },
     /// Saved file changes delivered to the agent.
     FilesChanged {
         headline: String,
@@ -144,7 +148,10 @@ impl Transcript {
         for item in &mut self.items {
             if matches!(
                 item.entry,
-                Entry::ToolCall { .. } | Entry::ToolResult { .. } | Entry::FilesChanged { .. }
+                Entry::ToolCall { .. }
+                    | Entry::ToolResult { .. }
+                    | Entry::FilesChanged { .. }
+                    | Entry::GitEvent { .. }
             ) {
                 item.layout = None;
             }
@@ -317,6 +324,27 @@ fn layout_entry(
                 NoticeLevel::Error => ("✗", Style::new().fg(Color::Red)),
             };
             (marker, style, style, wrap(text, body_width), None)
+        }
+        Entry::GitEvent { headline, text } => {
+            let style = Style::new().fg(Color::Blue);
+            let source = if expanded { text } else { headline };
+            let safe: String = source
+                .chars()
+                .map(|c| {
+                    if c.is_control() && !(expanded && c == '\n') {
+                        ' '
+                    } else {
+                        c
+                    }
+                })
+                .collect();
+            (
+                "⎇",
+                style,
+                style,
+                wrap(&safe, body_width),
+                Some(CHANGES_MAX_LINES),
+            )
         }
         Entry::FilesChanged {
             headline,
@@ -762,6 +790,83 @@ mod tests {
                 "✎ 2 files changed",
                 "  modified src/a.rs (+1 -0)",
                 "  deleted src/b.rs"
+            ]
+        );
+    }
+
+    #[test]
+    fn git_event_shows_headline_until_expanded_and_invalidates_cached_layout() {
+        let mut t = Transcript::default();
+        t.push(Entry::GitEvent {
+            headline: "main → feature".into(),
+            text: "Branch switched: main → feature\nabc123  Alex  Add feature\n src/a.rs | 2 ++"
+                .into(),
+        });
+        let total = t.line_count(80);
+        assert_eq!(text(&t.lines(80, 0..total)), ["", "⎇ main → feature"]);
+        t.toggle_expanded();
+        let total = t.line_count(80);
+        assert_eq!(
+            text(&t.lines(80, 0..total)),
+            [
+                "",
+                "⎇ Branch switched: main → feature",
+                "  abc123  Alex  Add feature",
+                "   src/a.rs | 2 ++",
+            ]
+        );
+        t.toggle_expanded();
+        assert_eq!(t.line_count(80), 2);
+        assert_eq!(text(&t.lines(80, 0..2)), ["", "⎇ main → feature"]);
+    }
+
+    #[test]
+    fn git_event_sanitizes_terminal_controls_but_keeps_expanded_lines() {
+        let mut t = Transcript::default();
+        t.push(Entry::GitEvent {
+            headline: "main\nfeature\u{1b}[31m".into(),
+            text: "subject\u{1b}[31m\nfile\tname\u{7f}".into(),
+        });
+        assert_eq!(text(&t.lines(80, 0..2)), ["", "⎇ main feature [31m"]);
+        t.toggle_expanded();
+        let total = t.line_count(80);
+        assert_eq!(
+            text(&t.lines(80, 0..total)),
+            ["", "⎇ subject [31m", "  file name"]
+        );
+    }
+
+    #[test]
+    fn git_event_roundtrips_through_versioned_journal_and_ui_restore() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("project");
+        std::fs::create_dir(&root).unwrap();
+        let data = temp.path().join("data");
+        let entry = Entry::GitEvent {
+            headline: "committed abc123 Add feature, 1 file".into(),
+            text: "committed abc123 Add feature, 1 file\n src/a.rs | 2 ++".into(),
+        };
+        let (session, _) = Session::open_in(&root, &data).unwrap();
+        let mut original = Transcript::default();
+        original.attach_session(session);
+        original.push(entry.clone());
+        assert!(original.take_persistence_error().is_none());
+        let total = original.line_count(80);
+        let compact = text(&original.lines(80, 0..total));
+        drop(original);
+
+        let (_session, restored) = Session::open_in(&root, &data).unwrap();
+        let mut transcript = Transcript::restore(restored.ui);
+        assert_eq!(transcript.entries().collect::<Vec<_>>(), [&entry]);
+        assert_eq!(text(&transcript.lines(80, 0..total)), compact);
+        transcript.toggle_expanded();
+        let total = transcript.line_count(80);
+        assert_eq!(
+            text(&transcript.lines(80, 0..total)),
+            [
+                "",
+                "⎇ committed abc123 Add feature, 1 file",
+                "   src/a.rs | 2 ++"
             ]
         );
     }

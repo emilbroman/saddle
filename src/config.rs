@@ -112,6 +112,8 @@ pub struct Config {
     pub batching: BatchingConfig,
     #[serde(default)]
     pub search: SearchConfig,
+    #[serde(default)]
+    pub git: GitConfig,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -213,6 +215,12 @@ impl Default for SearchConfig {
     }
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct GitConfig {
+    pub default_branch: Option<String>,
+}
+
 impl Config {
     pub fn parse(source: &str, path: &Path) -> Result<Self, ConfigError> {
         let config: Config = toml::from_str(source).map_err(|e| ConfigError::Parse {
@@ -285,6 +293,16 @@ impl Config {
                 "`search.num_results` must be between 1 and {}",
                 crate::tools::web_search::MAX_RESULTS
             ));
+        }
+        if let Some(branch) = &self.git.default_branch
+            && (branch.trim().is_empty()
+                || branch.starts_with('-')
+                || branch.chars().any(char::is_control))
+        {
+            return Err(
+                "`git.default_branch` must be nonempty, not start with `-`, and contain no control characters"
+                    .into(),
+            );
         }
         Ok(())
     }
@@ -503,6 +521,9 @@ diagnostics_max_wait_ms = 2000
 [search]
 enabled = false
 num_results = 8
+
+[git]
+default_branch = "develop"
 "#;
 
     #[test]
@@ -533,6 +554,7 @@ num_results = 8
         assert_eq!(config.batching.diagnostics_max_wait_ms, 2_000);
         assert!(!config.search.enabled);
         assert_eq!(config.search.num_results, 8);
+        assert_eq!(config.git.default_branch.as_deref(), Some("develop"));
     }
 
     #[test]
@@ -546,6 +568,49 @@ num_results = 8
         assert_eq!(config.sandbox, SandboxConfig::default());
         assert_eq!(config.batching, BatchingConfig::default());
         assert_eq!(config.search, SearchConfig::default());
+        assert_eq!(config.git, GitConfig::default());
+        assert_eq!(config.git.default_branch, None);
+    }
+
+    #[test]
+    fn git_config_defaults_and_rejects_unknown_fields() {
+        let config = Config::parse(&format!("{CONFIG_EXAMPLE}\n[git]\n"), &p()).unwrap();
+        assert_eq!(config.git.default_branch, None);
+        let err = Config::parse(
+            &format!("{CONFIG_EXAMPLE}\n[git]\ndefault_brnach = \"main\"\n"),
+            &p(),
+        )
+        .unwrap_err();
+        assert!(matches!(err, ConfigError::Parse { .. }));
+        assert!(err.to_string().contains("default_brnach"));
+    }
+
+    #[test]
+    fn git_default_branch_validation() {
+        for branch in [
+            "\"\"",
+            "\"   \"",
+            "\"-main\"",
+            "\"main\\n\"",
+            "\"main\\t\"",
+            "\"main\\u007f\"",
+        ] {
+            let err = Config::parse(
+                &format!("{CONFIG_EXAMPLE}\n[git]\ndefault_branch = {branch}\n"),
+                &p(),
+            )
+            .unwrap_err();
+            assert!(matches!(err, ConfigError::Invalid { .. }), "{err}");
+            assert!(err.to_string().contains("git.default_branch"), "{err}");
+        }
+        for branch in ["main", "origin/main", "release/stable"] {
+            let config = Config::parse(
+                &format!("{CONFIG_EXAMPLE}\n[git]\ndefault_branch = {branch:?}\n"),
+                &p(),
+            )
+            .unwrap();
+            assert_eq!(config.git.default_branch.as_deref(), Some(branch));
+        }
     }
 
     #[test]

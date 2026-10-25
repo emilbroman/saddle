@@ -86,10 +86,26 @@ async fn run() -> anyhow::Result<()> {
     let (senders, mut receivers) = events::channels();
     let observed = Observed::default();
     observed.restore(restored.state.observed.clone());
-    let resume_changes = if restored.existing {
-        observed.resume(&project_root, writable.clone())
+    let mut resume_files = if restored.existing {
+        observed.resume_all(&project_root, writable.clone())
     } else {
         Vec::new()
+    };
+    let git = saddle::watch::GitTracking {
+        tracker: saddle::git::Tracker::new(
+            project_root.clone(),
+            loaded.config.git.default_branch.clone(),
+            session.git_state(),
+        ),
+        session: Some(session.clone()),
+    };
+    let sync_paths = resume_files.iter().map(|f| f.path.clone()).collect();
+    let git_event = git.classify(&mut resume_files, None, !restored.existing)?;
+    let resume_changes = saddle::watch::ChangeSet {
+        files: resume_files,
+        git: git_event.into_iter().collect(),
+        sync_paths,
+        diagnostics: None,
     };
     let snapshot_session = session.clone();
     let snapshot_events = senders.fs.clone();
@@ -102,7 +118,7 @@ async fn run() -> anyhow::Result<()> {
     }));
     session.save_snapshots(observed.snapshot())?;
     let (changes_tx, changes_rx) = mpsc::unbounded_channel();
-    let _watcher = Watcher::spawn(
+    let _watcher = Watcher::spawn_with_git(
         project_root.clone(),
         WatchConfig {
             quiet: Duration::from_millis(loaded.config.batching.quiet_ms),
@@ -111,6 +127,7 @@ async fn run() -> anyhow::Result<()> {
         },
         observed.clone(),
         changes_tx,
+        git.clone(),
     );
     let mut tools = Registry::read_only(fs.clone(), observed.clone());
     status.web_search = web_search::install(
@@ -181,6 +198,7 @@ async fn run() -> anyhow::Result<()> {
     );
     app.attach_session(session, restored, observed, writable);
     app.attach_agent(AgentHandle::spawn(agent));
+    app.attach_git(git);
     app.resume(resume_changes, lost_jobs);
     for (text, error) in sandbox_notes {
         app.notice(text, error);
@@ -217,15 +235,11 @@ async fn run() -> anyhow::Result<()> {
 }
 
 async fn enrich_resume(
-    files: Vec<saddle::watch::FileChange>,
+    set: saddle::watch::ChangeSet,
     lsp: LspManager,
     batching: &config::BatchingConfig,
 ) -> saddle::watch::ChangeSet {
-    let set = saddle::watch::ChangeSet {
-        files,
-        diagnostics: None,
-    };
-    if set.files.is_empty() || !lsp.has_servers_configured() {
+    if set.changed_paths().is_empty() || !lsp.has_servers_configured() {
         return set;
     }
     let (input, incoming) = mpsc::unbounded_channel();

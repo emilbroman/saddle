@@ -87,16 +87,21 @@ impl Observed {
 
     /// Restore a snapshot before calling this; seeding first hides new files.
     pub fn resume(&self, root: &Path, excluded: Vec<PathBuf>) -> Vec<FileChange> {
+        let mut changes = self.resume_all(root, excluded);
+        changes.retain(|change| !equals_head(root, &change.path));
+        changes
+    }
+
+    pub fn resume_all(&self, root: &Path, excluded: Vec<PathBuf>) -> Vec<FileChange> {
         let mut filter = Filter::new(root, excluded);
-        let mut changes = self.compare(
+        self.compare(
             &mut filter,
             Batch {
                 paths: BTreeSet::new(),
                 rescan: true,
+                ..Default::default()
             },
-        );
-        changes.retain(|change| !equals_head(root, &change.path));
-        changes
+        )
     }
 
     /// Records a file the agent read in full, so later changes to it are diffed.
@@ -155,15 +160,13 @@ impl Observed {
     }
 }
 
-fn equals_head(root: &Path, path: &Path) -> bool {
+pub(crate) fn equals_head(root: &Path, path: &Path) -> bool {
     use std::process::Command;
 
     let Ok(relative) = path.strip_prefix(root) else {
         return false;
     };
-    let Ok(metadata) = fs::symlink_metadata(path) else {
-        return false;
-    };
+    let metadata = fs::symlink_metadata(path);
     let Ok(tree) = Command::new("git")
         .arg("--literal-pathspecs")
         .arg("-C")
@@ -177,6 +180,12 @@ fn equals_head(root: &Path, path: &Path) -> bool {
     if !tree.status.success() {
         return false;
     }
+    if tree.stdout.is_empty() {
+        return metadata.is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound);
+    }
+    let Ok(metadata) = metadata else {
+        return false;
+    };
     let Some(tab) = tree.stdout.iter().position(|b| *b == b'\t') else {
         return false;
     };
@@ -441,6 +450,7 @@ mod tests {
             let batch = Batch {
                 paths: rels.iter().map(|r| self.path(r)).collect(),
                 rescan: false,
+                ..Default::default()
             };
             self.compare_batch(batch)
         }
@@ -698,6 +708,7 @@ mod tests {
         let changes = p.compare_batch(Batch {
             paths: BTreeSet::new(),
             rescan: true,
+            ..Default::default()
         });
         let paths: Vec<_> = changes.iter().map(|c| (c.0, c.1.as_str())).collect();
         assert_eq!(

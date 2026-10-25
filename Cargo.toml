@@ -13,12 +13,15 @@ futures = "0.3"
 genai = "=0.7.1"
 globset = "0.4.20"
 ignore = "0.4.33"
+notify = "8.2"
+notify-debouncer-full = "0.7"
 ratatui = "0.30.2"
 ratatui-textarea = "0.9.3"
 regex = "1.13.1"
 reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1.0.154"
+similar = "3"
 textwrap = { version = "0.16", default-features = false, features = ["unicode-width", "smawk"] }
 thiserror = "2"
 tokio = { version = "1.54", features = ["rt-multi-thread", "macros", "sync", "time"] }

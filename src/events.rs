@@ -2,9 +2,11 @@
 //! (agent loop, file watcher, shell jobs) arrive in later slices; they get a
 //! clone of the relevant sender from [`EventSenders`].
 
-use std::path::PathBuf;
+use std::sync::Arc;
 
 use tokio::sync::mpsc;
+
+use crate::watch::ChangeSet;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TurnOutcome {
@@ -42,7 +44,10 @@ pub enum AgentEvent {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FsEvent {
-    Changed(Vec<PathBuf>),
+    /// A batch of saved changes, never empty.
+    Changed(Arc<ChangeSet>),
+    /// The watcher could not watch (part of) the project.
+    Warning(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

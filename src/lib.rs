@@ -11,3 +11,4 @@ pub mod tools;
 pub mod transcript;
 pub mod tui;
 pub mod ui;
+pub mod watch;

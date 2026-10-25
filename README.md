@@ -7,8 +7,8 @@ change and why, watches your edits as you save them, and uses language servers
 to keep an accurate picture of the code.
 
 Status: early. The agent converses, streams its answers, reads the project
-through read-only file tools and is told when you save changes. LSP and the
-sandboxed shell are still being built.
+through read-only file tools, runs shell commands in an OS-enforced read-only
+sandbox and is told when you save changes. LSP is still being built.
 
 ## Building and running
 
@@ -91,13 +91,14 @@ args = []                                # optional
 file_types = ["rs"]                      # extensions without the dot
 root_markers = ["Cargo.toml"]            # optional
 
-# Writable carve-outs for the agent's sandboxed shell commands. The project
-# itself is always read-only.
+# The agent's sandboxed shell. The project itself is always read-only.
 [sandbox]
-writable = ["~/.cargo"]                  # global paths (default: ["~/.cargo"])
+writable = ["~/.cargo"]                  # writable paths outside projects, absolute or ~/ (default: ["~/.cargo"])
+backend = "auto"                         # auto, bwrap, landlock (Linux) or seatbelt (macOS)
+env = []                                 # extra environment variable names passed to commands
 
-[sandbox.projects."~/src/saddle"]        # keyed by project root
-writable = ["target"]                    # relative to that root
+[sandbox.projects."~/src/saddle"]        # writable build-output dirs, keyed by project root
+writable = ["target"]                    # relative to that root, no `..`
 # Projects without an entry get `target` if they contain a Cargo.toml.
 
 [batching]                               # grouping of file-change notifications
@@ -180,6 +181,89 @@ model as untrusted source material, not instructions. Requests time out after
 30 s; key, credit, rate-limit and network errors appear as the tool's result in
 the transcript. The agent cannot fetch whole pages.
 
+### Shell
+
+The shell tools run commands asynchronously, as jobs:
+
+| Tool           | What it does                                                              |
+| -------------- | ------------------------------------------------------------------------- |
+| `shell_start`  | Starts `/bin/sh -c <command>` (optionally in a project subdirectory) and returns a job id, plus the result if it finishes within 1.5 s. |
+| `shell_wait`   | Waits up to `timeout_secs` (default 60, at most 600) for a job to finish and returns its status and new output. |
+| `shell_output` | Returns a job's status and its output since the last read, without waiting. |
+| `shell_kill`   | Terminates a job's process group (SIGTERM, then SIGKILL after 2 s).        |
+| `shell_list`   | Lists the session's jobs.                                                 |
+
+A wait is interrupted, like any tool call, by Esc or by a batch of saved
+changes; the job keeps running and the agent can wait on it again. Output is
+captured with stderr merged into stdout. Each read returns at most the first
+8 KiB and the last 24 KiB of what arrived since the previous read; the full
+output (up to 64 MiB) is kept in `$TMPDIR/jobs/<id>.log`, where the agent can
+`grep` it. Running jobs are counted in the status line, and the transcript
+notes when each one ends. All jobs are killed when Saddle exits.
+
+#### The sandbox
+
+Every command runs under an OS-enforced sandbox, never unconfined:
+
+- **The project is read-only** through every path: its files, `.git` (so
+  `git commit`, `stash`, `checkout` and the like fail, while `status`, `log`,
+  `diff` work), build scripts and tests run by the agent, symlinks and hard
+  links.
+- **Writable:** a private per-session scratch directory, which is `TMPDIR`
+  (on Linux it is also mounted at `/tmp`) and is deleted when Saddle exits; the
+  project's build-output carve-outs (`target/` by default for Cargo projects,
+  created if missing); and the global carve-outs (`~/.cargo` by default, plus
+  `$CARGO_HOME` when it is set). Add other toolchain caches, such as
+  `~/.rustup` or `~/Library/Caches/...`, to `sandbox.writable` if your
+  commands need them. Paths that contain the project, or lie inside `.git`, are
+  refused with a notice. Everything else on the filesystem is readable and
+  read-only.
+- **Network:** unrestricted.
+- **Hidden:** `credentials.toml` (bwrap and Seatbelt; see the gaps below).
+- **Environment:** a curated one: `PATH`, `HOME`, `USER`, locale, `TZ`, TLS
+  certificate paths, compiler and SDK variables, and anything starting with
+  `LC_`, `NIX_`, `CARGO_`, `RUSTUP_`, `RUST` or `PKG_CONFIG`, plus the names
+  in `sandbox.env`. Names with a part such as `KEY`, `TOKEN`, `SECRET`,
+  `PASSWORD` or `AUTH` are always dropped. Commands get `TERM=dumb`, `cat` as
+  pager, `GIT_OPTIONAL_LOCKS=0` and `SADDLE_SANDBOX=<backend>`. There is no
+  terminal and stdin is `/dev/null`.
+- Commands start in their own session and process group, and inherit no file
+  descriptors besides stdin, stdout and stderr.
+
+The backend, shown in the status line:
+
+- **Linux: Bubblewrap** (`bwrap` on `PATH`), which needs unprivileged user
+  namespaces. The root filesystem is bind-mounted read-only, with the scratch
+  directory, the carve-outs and an empty `/dev/null` over the credentials file
+  mounted on top, in fresh user, PID, IPC and UTS namespaces sharing the
+  host's network. Where a new `/proc` cannot be mounted (inside unprivileged
+  containers) the host's is bound read-only instead.
+- **Linux fallback: Landlock** (kernel 6.2 or newer, Landlock ABI 3), used when
+  bwrap is missing or cannot create namespaces. Saddle re-executes itself as a
+  small launcher that restricts every filesystem write right to the writable
+  paths and then runs the shell.
+- **macOS: Seatbelt**, through `/usr/bin/sandbox-exec` with a generated
+  profile: everything is allowed except writes outside the writable paths,
+  hard links, moving the carve-outs themselves, and reading the credentials
+  file. Apple has deprecated `sandbox-exec`, but it ships with every macOS.
+
+Saddle probes the sandbox at startup, including an attempt to create a
+directory in the project that must fail, and re-probes before each command. If
+no backend works, or one stops working, the shell tools are disabled, and the
+status line and transcript say why; set `sandbox.backend` to force one.
+
+Known gaps:
+
+- Landlock does not restrict metadata changes (`chmod`, `touch` on existing
+  files, extended attributes) and cannot hide single files from reads, so the
+  agent could read `credentials.toml` there. File contents are protected.
+- Seatbelt is verified by hand, not by the test suite: see
+  [docs/macos-sandbox-checklist.md](docs/macos-sandbox-checklist.md).
+- On macOS, a process a command detaches into its own session survives
+  `shell_kill`; on Linux the PID namespace ends with the job.
+- Read access is not restricted: commands can read anything your user can,
+  apart from the hidden credentials file.
+
 The system prompt is `src/prompts/system.md`.
 
 ## Architecture
@@ -197,7 +281,11 @@ A single crate with a library (`src/lib.rs`) and a thin binary (`src/main.rs`):
 - `provider` — streaming inference behind a `Provider` trait: `genai` against
   the configured endpoint, and a scripted provider for tests.
 - `tools` — the `Tool` trait and registry, root confinement, the read-only
-  file tools and Exa web search.
+  file tools, the shell tools and Exa web search.
+- `sandbox` — the sandbox policy, curated environment and backends (Bubblewrap
+  arguments, the Landlock launcher, the Seatbelt profile), with probing.
+- `jobs` — shell jobs: spawning under the sandbox, output capture, waiting and
+  killing.
 - `watch` — the file watcher (`notify` with its full debouncer), ignore
   filtering, the batching policy, the record of what Saddle last saw of each
   file, and the change event sent to the agent. Change sets also go to
@@ -224,10 +312,12 @@ cargo fmt
 `tests/smoke.rs` drives the event loop headlessly against ratatui's test
 backend, including agent turns with a scripted provider and a file change
 interrupting a turn. `tests/watch.rs` runs the watcher against the real
-filesystem. `tests/lsp.rs` runs the LSP client against a scripted
-server (`tests/fixtures/fake_lsp.py`; skipped without `python3`). A slower
-smoke test against a real rust-analyzer on a copy of this crate is ignored by
-default:
+filesystem. `tests/sandbox.rs` runs commands under every Linux backend the
+host provides, skipping the others; set `SADDLE_REQUIRE_SANDBOX=bwrap,landlock`
+to make a missing backend fail instead. `tests/lsp.rs` runs the LSP client
+against a scripted server (`tests/fixtures/fake_lsp.py`; skipped without
+`python3`). A slower smoke test against a real rust-analyzer on a copy of this
+crate is ignored by default:
 
 ```sh
 cargo test --test lsp_rust_analyzer -- --ignored --nocapture

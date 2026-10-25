@@ -14,6 +14,7 @@ futures = "0.3"
 genai = "=0.7.1"
 globset = "0.4.20"
 ignore = "0.4.33"
+libc = "0.2.191"
 notify = "8.2"
 notify-debouncer-full = "0.7"
 lsp-types = "0.95.1"
@@ -24,13 +25,16 @@ reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1.0.154"
 similar = "3"
+tempfile = "3"
 textwrap = { version = "0.16", default-features = false, features = ["unicode-width", "smawk"] }
 thiserror = "2"
-tokio = { version = "1.54", features = ["rt-multi-thread", "macros", "sync", "time", "process", "io-util"] }
+tokio = { version = "1.54", features = ["rt-multi-thread", "macros", "sync", "time", "process", "io-util", "signal"] }
 tokio-util = { version = "0.7.20", features = ["compat"] }
 toml = "1.1"
 unicode-width = "0.2"
 
+[target.'cfg(target_os = "linux")'.dependencies]
+landlock = "0.4.7"
+
 [dev-dependencies]
-tempfile = "3"
 tokio = { version = "1.54", features = ["net", "io-util"] }

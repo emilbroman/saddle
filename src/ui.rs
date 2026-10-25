@@ -98,6 +98,12 @@ fn render_status(frame: &mut Frame, app: &App, area: Rect) {
         let color = if failing { Color::Red } else { Color::Yellow };
         spans.push(Span::styled(format!(" lsp: {lsp} "), base.fg(color)));
     }
+    if !app.running_jobs.is_empty() {
+        spans.push(Span::styled(
+            format!(" jobs: {} running ", app.running_jobs.len()),
+            base.fg(Color::LightBlue),
+        ));
+    }
     match app.activity {
         Activity::Idle => {}
         Activity::Working => spans.push(Span::styled(

@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::io;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -55,6 +56,8 @@ pub struct App {
     /// Change sets waiting for the interrupted turn to wind down.
     pending_changes: Vec<Arc<ChangeSet>>,
     pub lsp_status: Vec<ServerStatus>,
+    /// Shell jobs still running, with their commands.
+    pub running_jobs: BTreeMap<u64, String>,
     /// Transcript size from the last render, for scrolling: (total lines, viewport rows).
     pub(crate) transcript_metrics: (usize, usize),
 }
@@ -81,6 +84,7 @@ impl App {
             should_quit: false,
             pending_changes: Vec::new(),
             lsp_status: Vec::new(),
+            running_jobs: BTreeMap::new(),
             transcript_metrics: (0, 0),
         }
     }
@@ -291,15 +295,42 @@ impl App {
 
     pub fn handle_job_event(&mut self, event: JobEvent) {
         match event {
-            JobEvent::Finished { id, exit_code } => self.transcript.push(Entry::Notice {
-                text: match exit_code {
-                    Some(code) => format!("job {id} exited with status {code}"),
-                    None => format!("job {id} was terminated"),
-                },
-                level: NoticeLevel::Info,
-            }),
+            JobEvent::Started { id, command } => {
+                self.running_jobs.insert(id, command);
+            }
+            JobEvent::Finished { id, summary } => {
+                let command = self.running_jobs.remove(&id).unwrap_or_default();
+                self.notice(format!("job {id} {summary}: {}", one_line(&command)), false);
+            }
+            JobEvent::SandboxLost(reason) => {
+                self.status.sandbox = "lost, shell disabled".into();
+                self.notice(format!("The shell tool is disabled: {reason}"), true);
+            }
         }
     }
+
+    /// Adds a notice to the transcript.
+    pub fn notice(&mut self, text: String, error: bool) {
+        self.transcript.push(Entry::Notice {
+            text,
+            level: if error {
+                NoticeLevel::Error
+            } else {
+                NoticeLevel::Info
+            },
+        });
+    }
+}
+
+/// The first line of `text`, marked when more follows, capped at 80 chars.
+fn one_line(text: &str) -> String {
+    let mut lines = text.trim().lines();
+    let first = lines.next().unwrap_or_default();
+    let mut out: String = first.chars().take(80).collect();
+    if lines.next().is_some() || first.chars().count() > 80 {
+        out.push('…');
+    }
+    out
 }
 
 fn new_input() -> TextArea<'static> {

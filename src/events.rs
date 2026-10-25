@@ -52,7 +52,17 @@ pub enum FsEvent {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum JobEvent {
-    Finished { id: u64, exit_code: Option<i32> },
+    Started {
+        id: u64,
+        command: String,
+    },
+    /// `summary` is e.g. "exited with status 0".
+    Finished {
+        id: u64,
+        summary: String,
+    },
+    /// A pre-command probe failed; the shell is disabled for the session.
+    SandboxLost(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

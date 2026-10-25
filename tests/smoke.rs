@@ -462,3 +462,93 @@ async fn lsp_status_reaches_the_status_line() {
         .collect();
     assert_eq!(notices.len(), 1, "{notices:?}");
 }
+
+#[tokio::test]
+async fn diagnostic_wait_interrupts_now_and_delivers_only_the_combined_message() {
+    use saddle::events::{FsEvent, TurnOutcome};
+    use saddle::watch::{ChangeKind, ChangeSet, Detail, FileChange};
+
+    let provider = ScriptedProvider::new([
+        vec![text("In flight"), Step::Hang],
+        vec![text("That is a type error.")],
+    ]);
+    let (senders, mut receivers) = events::channels();
+    let mut app = app(senders.clone());
+    app.attach_agent(AgentHandle::spawn(Agent::new(
+        Arc::new(provider.clone()),
+        Registry::default(),
+        "system".into(),
+        senders.agent,
+    )));
+    app.handle_terminal_event(Event::Paste("explain this".into()));
+    app.handle_terminal_event(Event::Key(KeyEvent::new(
+        KeyCode::Enter,
+        KeyModifiers::NONE,
+    )));
+    loop {
+        let event = tokio::time::timeout(Duration::from_secs(2), receivers.agent.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        let streaming = matches!(event, AgentEvent::AssistantDelta(_));
+        app.handle_agent_event(event);
+        if streaming {
+            break;
+        }
+    }
+    app.handle_fs_event(FsEvent::Settling);
+    loop {
+        let event = tokio::time::timeout(Duration::from_secs(2), receivers.agent.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        let finished = event == AgentEvent::TurnFinished(TurnOutcome::Interrupted);
+        app.handle_agent_event(event);
+        if finished {
+            break;
+        }
+    }
+    assert_eq!(provider.requests.lock().unwrap().len(), 1);
+    app.handle_terminal_event(Event::Paste("keep my draft".into()));
+    app.handle_terminal_event(Event::Key(KeyEvent::new(
+        KeyCode::Enter,
+        KeyModifiers::NONE,
+    )));
+    assert_eq!(app.input.lines(), ["keep my draft"]);
+    let diagnostics =
+        "<diagnostic-changes>\nnew: a.rs:1:1 Error: mismatched types\n</diagnostic-changes>";
+    app.handle_fs_event(FsEvent::Changed(Arc::new(ChangeSet {
+        files: vec![FileChange {
+            path: "/src/project/a.rs".into(),
+            display: "a.rs".into(),
+            kind: ChangeKind::Modified,
+            detail: Detail::Unseen { size: 1 },
+        }],
+        diagnostics: Some(diagnostics.into()),
+    })));
+    loop {
+        let event = tokio::time::timeout(Duration::from_secs(2), receivers.agent.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        let finished = matches!(event, AgentEvent::TurnFinished(_));
+        app.handle_agent_event(event);
+        if finished {
+            break;
+        }
+    }
+    let requests = provider.requests.lock().unwrap();
+    assert_eq!(requests.len(), 2);
+    let event = requests[1]
+        .messages
+        .last()
+        .unwrap()
+        .content
+        .first_text()
+        .unwrap();
+    assert!(
+        event.contains("<file-changes>") && event.contains(diagnostics),
+        "{event}"
+    );
+    assert!(app.transcript.entries().any(|entry| matches!(entry, Entry::FilesChanged { details, .. } if details.iter().any(|s| s == diagnostics))));
+}

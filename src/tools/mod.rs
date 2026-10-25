@@ -5,6 +5,7 @@
 pub mod fs;
 mod grep;
 mod list;
+pub mod lsp;
 mod read_file;
 pub mod shell;
 pub mod web_search;

@@ -73,6 +73,8 @@ pub struct FileChange {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChangeSet {
     pub files: Vec<FileChange>,
+    /// Bounded diagnostic changes, filled after language servers settle.
+    pub diagnostics: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -202,7 +204,7 @@ async fn run(
                 if let Some(batch) = task.batcher.take_due(Instant::now()) {
                     let files = task.compare(&observed, batch).await;
                     if !files.is_empty() {
-                        let set = Arc::new(ChangeSet { files });
+                        let set = Arc::new(ChangeSet { files, diagnostics: None });
                         let _ = changes.send(set.clone());
                         let _ = task.events.send(FsEvent::Changed(set));
                     }

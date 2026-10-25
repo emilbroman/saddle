@@ -415,27 +415,14 @@ impl Server {
         docs.open.get(path).map(|d| d.text.clone())
     }
 
-    /// Opens `path` from disk if it is not open yet; returns its content.
+    /// Opens or refreshes `path` from disk; returns its current content.
     pub fn ensure_open(&self, path: &Path) -> Result<String, LspError> {
-        if let Some(text) = self.touch(path) {
-            return Ok(text);
-        }
         let text = super::read_text(path).map_err(|e| LspError::Io {
             path: path.to_owned(),
             message: e,
         })?;
         self.sync(path, Some(text.clone()), false);
         Ok(text)
-    }
-
-    fn touch(&self, path: &Path) -> Option<String> {
-        let mut docs = self.documents.lock().unwrap();
-        docs.clock += 1;
-        let clock = docs.clock;
-        docs.open.get_mut(path).map(|doc| {
-            doc.last_used = clock;
-            doc.text.clone()
-        })
     }
 
     /// Applies on-disk state to the document: `None` means the file is gone.

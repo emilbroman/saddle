@@ -44,6 +44,8 @@ pub enum AgentEvent {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FsEvent {
+    /// Interrupt now; the combined change event follows after diagnostics settle.
+    Settling,
     /// A batch of saved changes, never empty.
     Changed(Arc<ChangeSet>),
     /// The watcher could not watch (part of) the project.

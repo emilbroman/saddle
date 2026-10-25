@@ -13,10 +13,10 @@ use saddle::jobs::Jobs;
 use saddle::lsp::LspManager;
 use saddle::provider::GenaiProvider;
 use saddle::sandbox::{self, Policy, Sandbox, Setup};
-use saddle::tools::{ProjectFs, Registry, shell, web_search};
+use saddle::tools::{ProjectFs, Registry, lsp as lsp_tools, shell, web_search};
 use saddle::watch::{Observed, WatchConfig, Watcher};
 use saddle::{config, events, project, prompt, tui};
-use tokio::sync::broadcast::error::RecvError;
+use tokio::sync::mpsc;
 
 fn main() -> ExitCode {
     // The Landlock helper must restrict itself while still single-threaded.
@@ -83,7 +83,8 @@ async fn run() -> anyhow::Result<()> {
         .with_context(|| format!("cannot open project root {}", project_root.display()))?;
     let (senders, receivers) = events::channels();
     let observed = Observed::default();
-    let watcher = Watcher::spawn(
+    let (changes_tx, changes_rx) = mpsc::unbounded_channel();
+    let _watcher = Watcher::spawn(
         project_root.clone(),
         WatchConfig {
             quiet: Duration::from_millis(loaded.config.batching.quiet_ms),
@@ -91,7 +92,7 @@ async fn run() -> anyhow::Result<()> {
             excluded: writable.clone(),
         },
         observed.clone(),
-        senders.fs.clone(),
+        changes_tx,
     );
     let mut tools = Registry::read_only(fs.clone(), observed);
     status.web_search = web_search::install(
@@ -106,7 +107,14 @@ async fn run() -> anyhow::Result<()> {
         Some(senders.lsp.clone()),
     );
     lsp.start_detected();
-    feed_changes(&watcher, lsp.clone());
+    lsp_tools::install(&mut tools, lsp.clone(), fs.clone());
+    let changes_task = tokio::spawn(saddle::lsp::changes::forward(
+        changes_rx,
+        senders.fs.clone(),
+        lsp.clone(),
+        Duration::from_millis(loaded.config.batching.diagnostics_quiet_ms),
+        Duration::from_millis(loaded.config.batching.diagnostics_max_wait_ms),
+    ));
     let scratch = tempfile::Builder::new()
         .prefix("saddle-")
         .tempdir()
@@ -165,22 +173,9 @@ async fn run() -> anyhow::Result<()> {
         jobs.shutdown().await;
     }
     drop(scratch);
+    changes_task.abort();
     lsp.shutdown().await;
     result
-}
-
-/// Keeps language servers in step with saved changes.
-fn feed_changes(watcher: &Watcher, lsp: LspManager) {
-    let mut changes = watcher.subscribe();
-    tokio::spawn(async move {
-        loop {
-            match changes.recv().await {
-                Ok(set) => lsp.did_change(set.files.iter().map(|f| f.path.clone()).collect()),
-                Err(RecvError::Lagged(_)) => continue,
-                Err(RecvError::Closed) => break,
-            }
-        }
-    });
 }
 
 async fn termination() {

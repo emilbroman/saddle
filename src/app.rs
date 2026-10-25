@@ -55,6 +55,7 @@ pub struct App {
     pub should_quit: bool,
     /// Change sets waiting for the interrupted turn to wind down.
     pending_changes: Vec<Arc<ChangeSet>>,
+    waiting_for_diagnostics: bool,
     pub lsp_status: Vec<ServerStatus>,
     /// Shell jobs still running, with their commands.
     pub running_jobs: BTreeMap<u64, String>,
@@ -83,6 +84,7 @@ impl App {
             input: new_input(),
             should_quit: false,
             pending_changes: Vec::new(),
+            waiting_for_diagnostics: false,
             lsp_status: Vec::new(),
             running_jobs: BTreeMap::new(),
             transcript_metrics: (0, 0),
@@ -146,7 +148,7 @@ impl App {
     fn submit(&mut self) {
         let text = self.input.lines().join("\n");
         // While a turn runs the draft stays in the input; Esc interrupts.
-        if text.trim().is_empty() || self.is_busy() {
+        if text.trim().is_empty() || self.is_busy() || self.waiting_for_diagnostics {
             return;
         }
         self.input = new_input();
@@ -170,10 +172,14 @@ impl App {
             AgentEvent::TurnFinished(outcome) => {
                 self.activity = Activity::Idle;
                 self.transcript.finish_assistant(StreamState::Interrupted);
-                let changes = std::mem::take(&mut self.pending_changes);
+                let changes = if self.waiting_for_diagnostics {
+                    Vec::new()
+                } else {
+                    std::mem::take(&mut self.pending_changes)
+                };
                 if outcome == TurnOutcome::Interrupted {
                     self.transcript.push(Entry::Notice {
-                        text: if changes.is_empty() {
+                        text: if changes.is_empty() && !self.waiting_for_diagnostics {
                             "Interrupted.".into()
                         } else {
                             "Interrupted: files changed.".into()
@@ -228,14 +234,21 @@ impl App {
     /// changes start a new one once it has wound down.
     pub fn handle_fs_event(&mut self, event: FsEvent) {
         match event {
+            FsEvent::Settling => {
+                self.waiting_for_diagnostics = true;
+                self.interrupt();
+            }
             FsEvent::Changed(changes) => {
+                self.waiting_for_diagnostics = false;
                 if self.is_busy()
                     && let Some(agent) = &self.agent
                 {
                     agent.interrupt();
                     self.pending_changes.push(changes);
                 } else {
-                    self.deliver_changes(&[changes]);
+                    self.pending_changes.push(changes);
+                    let changes = std::mem::take(&mut self.pending_changes);
+                    self.deliver_changes(&changes);
                 }
             }
             FsEvent::Warning(text) => self.transcript.push(Entry::Notice {
@@ -250,13 +263,24 @@ impl App {
             .iter()
             .flat_map(|set| set.files.iter().cloned())
             .collect();
+        let diagnostics: Vec<_> = sets
+            .iter()
+            .filter_map(|s| s.diagnostics.as_deref())
+            .collect();
+        let mut details: Vec<_> = files.iter().map(message::file_line).collect();
+        details.extend(diagnostics.iter().map(|s| (*s).to_owned()));
         self.transcript.push(Entry::FilesChanged {
             headline: message::headline(&files),
             paths: files.iter().map(|f| f.display.clone()).collect(),
-            details: files.iter().map(message::file_line).collect(),
+            details,
         });
         if let Some(agent) = &self.agent {
-            agent.send(message::describe(&files));
+            let mut text = message::describe(&files);
+            for diagnostic in diagnostics {
+                text.push('\n');
+                text.push_str(diagnostic);
+            }
+            agent.send(text);
             self.activity = Activity::Working;
         }
     }

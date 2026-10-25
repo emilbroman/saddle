@@ -169,7 +169,12 @@ async fn crashed_server_restarts_and_recovers() {
     let file = root.join("b.txt");
     std::fs::write(&file, "CRASH\n").unwrap();
     manager.did_change(vec![file.clone()]);
-    wait_for(&mut rx, |s| matches!(s, ServerState::Restarting { attempt: 1, reason } if reason.contains("crashing on request"))).await;
+    // Stderr is read independently and may arrive after the exit status.
+    wait_for(
+        &mut rx,
+        |s| matches!(s, ServerState::Restarting { attempt: 1, reason } if !reason.is_empty()),
+    )
+    .await;
 
     // Restarts re-open the remembered content, so fixing the file lets it recover.
     std::fs::write(&file, "ERROR\n").unwrap();

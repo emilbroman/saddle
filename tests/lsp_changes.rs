@@ -11,6 +11,8 @@ use tokio::sync::mpsc;
 
 fn changed(root: &Path, path: &str) -> FsEvent {
     FsEvent::Changed(Arc::new(ChangeSet {
+        git: Vec::new(),
+        sync_paths: Vec::new(),
         files: vec![FileChange {
             path: root.join(path),
             display: path.into(),
@@ -87,11 +89,22 @@ async fn coalesced_changes_carry_new_and_resolved_diagnostics() {
     tx.send(changed(&root, "a.txt")).unwrap();
     assert_eq!(receive(&mut events).await, FsEvent::Settling);
     std::fs::write(root.join("b.txt"), "ERROR\n").unwrap();
-    tx.send(changed(&root, "b.txt")).unwrap();
+    tx.send(FsEvent::Changed(Arc::new(ChangeSet {
+        git: vec![saddle::git::GitEvent {
+            headline: "Branch switch".into(),
+            text: "<git-event>Branch switch: main → feature</git-event>".into(),
+        }],
+        sync_paths: vec![root.join("b.txt")],
+        ..Default::default()
+    })))
+    .unwrap();
     let FsEvent::Changed(set) = receive(&mut events).await else {
         panic!("expected combined event")
     };
-    assert_eq!(set.files.len(), 2);
+    assert_eq!(set.files.len(), 1);
+    assert_eq!(set.git.len(), 1);
+    assert!(set.git[0].text.contains("feature"));
+    assert!(set.sync_paths.contains(&root.join("b.txt")));
     let diagnostics = set.diagnostics.as_deref().unwrap();
     assert!(
         diagnostics.contains("new: a.txt:1:4 Error: found ERROR"),

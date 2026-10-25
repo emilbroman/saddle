@@ -5,6 +5,7 @@ pub mod app;
 pub mod config;
 pub mod context;
 pub mod events;
+pub mod git;
 pub mod jobs;
 pub mod lsp;
 pub mod project;

@@ -55,6 +55,7 @@ pub struct App {
     session: Option<Session>,
     observed: Option<Observed>,
     snapshot_excluded: Vec<PathBuf>,
+    git: Option<crate::watch::GitTracking>,
     pub transcript: Transcript,
     pub scroll: Scroll,
     pub input: TextArea<'static>,
@@ -89,6 +90,7 @@ impl App {
             session: None,
             observed: None,
             snapshot_excluded: Vec::new(),
+            git: None,
             transcript: Transcript::default(),
             scroll: Scroll::default(),
             input: new_input(),
@@ -117,13 +119,19 @@ impl App {
         self.scroll.bottom();
     }
 
+    pub fn attach_git(&mut self, git: crate::watch::GitTracking) {
+        self.git = Some(git);
+    }
+
     /// Resume inputs are combined into one turn; unchanged sessions stay silent.
     pub fn resume(&mut self, changes: ChangeSet, lost_jobs: BTreeMap<u64, String>) {
-        let mut inputs = Vec::new();
-        if !changes.files.is_empty() {
+        let mut inputs = self.record_git(&changes.git);
+        if !changes.files.is_empty() || changes.diagnostics.is_some() {
             let diagnostics: Vec<_> = changes.diagnostics.as_deref().into_iter().collect();
             self.record_changes(&changes.files, &diagnostics);
-            inputs.push(message::describe(&changes.files));
+            if !changes.files.is_empty() {
+                inputs.push(message::describe(&changes.files));
+            }
             inputs.extend(diagnostics.into_iter().map(str::to_owned));
         }
         if !lost_jobs.is_empty() {
@@ -182,6 +190,19 @@ impl App {
         }
         for (id, command) in self.running_jobs.clone() {
             self.persist(LogEvent::JobStarted { id, command });
+        }
+        if let Some(git) = self.git.clone() {
+            git.tracker.reset();
+            match git.classify(&mut Vec::new(), None, true) {
+                Ok(event) => self.resume(
+                    ChangeSet {
+                        git: event.into_iter().collect(),
+                        ..Default::default()
+                    },
+                    BTreeMap::new(),
+                ),
+                Err(e) => self.notice(format!("Cannot orient the new conversation: {e:#}"), true),
+            }
         }
         self.scroll.bottom();
     }
@@ -284,6 +305,8 @@ impl App {
                     self.transcript.push(Entry::Notice {
                         text: if changes.is_empty() && !self.waiting_for_diagnostics {
                             "Interrupted.".into()
+                        } else if changes.iter().any(|set| !set.git.is_empty()) {
+                            "Interrupted: repository changed.".into()
                         } else {
                             "Interrupted: files changed.".into()
                         },
@@ -370,16 +393,37 @@ impl App {
             .iter()
             .filter_map(|s| s.diagnostics.as_deref())
             .collect();
-        self.record_changes(&files, &diagnostics);
-        if let Some(agent) = &self.agent {
-            let mut text = message::describe(&files);
-            for diagnostic in diagnostics {
-                text.push('\n');
-                text.push_str(diagnostic);
-            }
-            agent.send_automatic(text);
+        let git: Vec<_> = sets
+            .iter()
+            .flat_map(|set| set.git.iter().cloned())
+            .collect();
+        let mut inputs = self.record_git(&git);
+        if !files.is_empty() || !diagnostics.is_empty() {
+            self.record_changes(&files, &diagnostics);
+        }
+        if !files.is_empty() {
+            inputs.push(message::describe(&files));
+        }
+        inputs.extend(diagnostics.into_iter().map(str::to_owned));
+        if !inputs.is_empty()
+            && let Some(agent) = &self.agent
+        {
+            agent.send_automatic(inputs.join("\n\n"));
             self.activity = Activity::Working;
         }
+    }
+
+    fn record_git(&mut self, events: &[crate::git::GitEvent]) -> Vec<String> {
+        events
+            .iter()
+            .map(|event| {
+                self.transcript.push(Entry::GitEvent {
+                    headline: event.headline.clone(),
+                    text: event.text.clone(),
+                });
+                event.text.clone()
+            })
+            .collect()
     }
 
     fn record_changes(&mut self, files: &[crate::watch::FileChange], diagnostics: &[&str]) {

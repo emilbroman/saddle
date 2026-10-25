@@ -64,6 +64,8 @@ fn application(root: &Path, data: &Path, provider: ScriptedProvider) -> (App, Ev
     app.attach_agent(AgentHandle::spawn(agent));
     app.resume(
         saddle::watch::ChangeSet {
+            git: Vec::new(),
+            sync_paths: Vec::new(),
             files: changes,
             diagnostics: None,
         },
@@ -247,6 +249,8 @@ async fn resume_diagnostics_and_lost_jobs_share_one_request() {
     let (mut app, mut events) = application(root.path(), data.path(), provider.clone());
     app.resume(
         ChangeSet {
+            git: Vec::new(),
+            sync_paths: Vec::new(),
             files: vec![FileChange {
                 path: root.path().join("new.rs"),
                 display: "new.rs".into(),

@@ -70,11 +70,26 @@ pub struct FileChange {
 }
 
 /// One flushed batch; never empty.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ChangeSet {
     pub files: Vec<FileChange>,
+    pub git: Vec<crate::git::GitEvent>,
+    /// Includes HEAD-folded changes, which still need document synchronization.
+    pub sync_paths: Vec<PathBuf>,
     /// Bounded diagnostic changes, filled after language servers settle.
     pub diagnostics: Option<String>,
+}
+
+impl ChangeSet {
+    pub fn changed_paths(&self) -> Vec<PathBuf> {
+        self.files
+            .iter()
+            .map(|f| f.path.clone())
+            .chain(self.sync_paths.iter().cloned())
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect()
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -84,6 +99,28 @@ pub struct WatchConfig {
     /// Directories whose contents are never reported (the sandbox's writable
     /// carve-outs, such as `target/`).
     pub excluded: Vec<PathBuf>,
+}
+
+#[derive(Clone)]
+pub struct GitTracking {
+    pub tracker: crate::git::Tracker,
+    pub session: Option<crate::session::Session>,
+}
+
+impl GitTracking {
+    pub fn classify(
+        &self,
+        files: &mut Vec<FileChange>,
+        window: Option<(std::time::SystemTime, std::time::SystemTime)>,
+        first: bool,
+    ) -> anyhow::Result<Option<crate::git::GitEvent>> {
+        let generation = self.session.as_ref().map(|s| s.generation());
+        let event = self.tracker.classify(files, window, first)?;
+        if let (Some(session), Some(generation)) = (&self.session, generation) {
+            session.save_git(self.tracker.state(), &generation)?;
+        }
+        Ok(event)
+    }
 }
 
 /// The running watcher. Change sets go to the app as [`FsEvent::Changed`];
@@ -101,8 +138,28 @@ impl Watcher {
         observed: Observed,
         events: mpsc::UnboundedSender<FsEvent>,
     ) -> Self {
+        Self::spawn_inner(root, config, observed, events, None)
+    }
+
+    pub fn spawn_with_git(
+        root: PathBuf,
+        config: WatchConfig,
+        observed: Observed,
+        events: mpsc::UnboundedSender<FsEvent>,
+        git: GitTracking,
+    ) -> Self {
+        Self::spawn_inner(root, config, observed, events, Some(git))
+    }
+
+    fn spawn_inner(
+        root: PathBuf,
+        config: WatchConfig,
+        observed: Observed,
+        events: mpsc::UnboundedSender<FsEvent>,
+        git: Option<GitTracking>,
+    ) -> Self {
         let (changes, _) = broadcast::channel(64);
-        let task = tokio::spawn(run(root, config, observed, events, changes.clone()));
+        let task = tokio::spawn(run(root, config, observed, events, changes.clone(), git));
         Self { changes, task }
     }
 
@@ -127,6 +184,9 @@ struct Task {
     batcher: Batcher,
     events: mpsc::UnboundedSender<FsEvent>,
     warned: HashSet<String>,
+    git: Option<GitTracking>,
+    git_dirs: Vec<PathBuf>,
+    git_watches: HashSet<PathBuf>,
 }
 
 async fn run(
@@ -135,6 +195,7 @@ async fn run(
     observed: Observed,
     events: mpsc::UnboundedSender<FsEvent>,
     changes: broadcast::Sender<Arc<ChangeSet>>,
+    git: Option<GitTracking>,
 ) {
     let (raw_tx, mut raw) = mpsc::unbounded_channel::<DebounceEventResult>();
     let debouncer = new_debouncer_opt::<_, RecommendedWatcher, NoCache>(
@@ -162,6 +223,13 @@ async fn run(
         batcher: Batcher::new(config.quiet, config.max_window),
         events,
         warned: HashSet::new(),
+        git_dirs: if git.is_some() {
+            crate::git::metadata_dirs(&root)
+        } else {
+            Vec::new()
+        },
+        git_watches: HashSet::new(),
+        git,
     };
 
     if task.per_directory {
@@ -170,6 +238,8 @@ async fn run(
         task.warn(format!("File watching is unavailable: {e}"));
         return;
     }
+
+    task.watch_git();
 
     // Seeding walks the whole project; events meanwhile wait in the channel.
     let filter = task.filter.take().unwrap();
@@ -183,6 +253,10 @@ async fn run(
         .expect("seeding the file record panicked"),
     );
 
+    if task.git.is_some() {
+        task.batcher.add_rescan(Instant::now());
+    }
+
     loop {
         let deadline = task.batcher.deadline();
         tokio::select! {
@@ -190,7 +264,7 @@ async fn run(
                 Some(Ok(batch)) => {
                     let now = Instant::now();
                     for event in batch {
-                        task.ingest(&event, now);
+                        task.ingest(&event, now, event.time);
                     }
                 }
                 Some(Err(errors)) => {
@@ -202,9 +276,9 @@ async fn run(
             },
             _ = sleep_until(deadline), if deadline.is_some() => {
                 if let Some(batch) = task.batcher.take_due(Instant::now()) {
-                    let files = task.compare(&observed, batch).await;
-                    if !files.is_empty() {
-                        let set = Arc::new(ChangeSet { files, diagnostics: None });
+                    let set = task.compare(&observed, batch).await;
+                    if !set.files.is_empty() || !set.git.is_empty() {
+                        let set = Arc::new(set);
                         let _ = changes.send(set.clone());
                         let _ = task.events.send(FsEvent::Changed(set));
                     }
@@ -227,9 +301,10 @@ impl Task {
             .expect("filter is only lent out while comparing")
     }
 
-    fn ingest(&mut self, event: &notify::Event, now: Instant) {
+    fn ingest(&mut self, event: &notify::Event, now: Instant, occurred: Instant) {
         if event.need_rescan() {
             self.batcher.add_rescan(now);
+            self.batcher.note_occurred(occurred);
         }
         // Reads (including the agent's own) open files; only writes matter.
         if let EventKind::Access(kind) = event.kind
@@ -238,6 +313,12 @@ impl Task {
             return;
         }
         for path in &event.paths {
+            if self.is_git_metadata(path) {
+                self.batcher.add_git(path.clone(), now);
+                self.batcher.note_occurred(occurred);
+                self.watch_git();
+                continue;
+            }
             let rules_changed = self.filter().invalidate(path);
             let is_dir = std::fs::symlink_metadata(path).is_ok_and(|m| m.is_dir());
             if self.filter().is_ignored(path, is_dir) {
@@ -254,6 +335,7 @@ impl Task {
                 self.watch_tree(&dir);
             }
             self.batcher.add(path.clone(), now);
+            self.batcher.note_occurred(occurred);
         }
     }
 
@@ -283,17 +365,85 @@ impl Task {
         }
     }
 
-    async fn compare(&mut self, observed: &Observed, batch: Batch) -> Vec<FileChange> {
+    fn is_git_metadata(&self, path: &Path) -> bool {
+        self.git_dirs.iter().any(|dir| {
+            let Ok(relative) = path.strip_prefix(dir) else {
+                return false;
+            };
+            if path.extension().is_some_and(|e| e == "lock") {
+                return false;
+            }
+            relative.as_os_str().is_empty()
+                || matches!(
+                    relative.to_str(),
+                    Some("HEAD" | "index" | "ORIG_HEAD" | "packed-refs")
+                )
+                || relative.starts_with("refs")
+        })
+    }
+
+    fn watch_git(&mut self) {
+        for dir in self.git_dirs.clone() {
+            for (path, mode) in [
+                (dir.clone(), RecursiveMode::NonRecursive),
+                (dir.join("refs"), RecursiveMode::Recursive),
+            ] {
+                if path.is_dir() && !self.git_watches.contains(&path) {
+                    match self.debouncer.watch(&path, mode) {
+                        Ok(()) => {
+                            self.git_watches.insert(path);
+                        }
+                        Err(e) => self.warn(format!(
+                            "Git metadata watching is unavailable for {}: {e}",
+                            path.display()
+                        )),
+                    }
+                }
+            }
+        }
+    }
+
+    async fn compare(&mut self, observed: &Observed, mut batch: Batch) -> ChangeSet {
         let mut filter = self.filter.take().unwrap();
         let observed = observed.clone();
-        let (filter, files) = tokio::task::spawn_blocking(move || {
-            let files = observed.compare(&mut filter, batch);
-            (filter, files)
+        let git = self.git.clone();
+        let movement = !batch.git_paths.is_empty() || batch.rescan;
+        // A metadata event may arrive without individual checkout paths (or before
+        // the debouncer releases them). The snapshot is the authority either way.
+        if movement {
+            batch.rescan = true;
+        }
+        let (filter, set, error) = tokio::task::spawn_blocking(move || {
+            let window = batch.window;
+            let mut files = observed.compare(&mut filter, batch);
+            let sync_paths = files.iter().map(|f| f.path.clone()).collect();
+            let mut events = Vec::new();
+            let mut error = None;
+            if movement && let Some(git) = git {
+                match git.classify(&mut files, window, false) {
+                    Ok(Some(event)) => events.push(event),
+                    Ok(None) => {}
+                    Err(e) => error = Some(format!("Cannot classify git movement: {e:#}")),
+                }
+            }
+            (
+                filter,
+                ChangeSet {
+                    files,
+                    git: events,
+                    sync_paths,
+                    diagnostics: None,
+                },
+                error,
+            )
         })
         .await
         .expect("comparing changes panicked");
         self.filter = Some(filter);
-        files
+        if let Some(error) = error {
+            self.warn(error);
+        }
+        set
     }
 
     /// Reports a problem once; watcher errors tend to repeat.

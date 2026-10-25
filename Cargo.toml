@@ -1,0 +1,23 @@
+[package]
+name = "saddle"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+description = "A reverse agent harness: a coding agent TUI that cannot write to your codebase"
+publish = false
+
+[dependencies]
+anyhow = "1"
+crossterm = { version = "0.29", features = ["event-stream"] }
+futures = "0.3"
+ratatui = "0.30.2"
+ratatui-textarea = "0.9.3"
+serde = { version = "1", features = ["derive"] }
+textwrap = { version = "0.16", default-features = false, features = ["unicode-width", "smawk"] }
+thiserror = "2"
+tokio = { version = "1.54", features = ["rt-multi-thread", "macros", "sync", "time"] }
+toml = "1.1"
+unicode-width = "0.2"
+
+[dev-dependencies]
+tempfile = "3"

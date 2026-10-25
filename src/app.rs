@@ -1,0 +1,209 @@
+use std::io;
+use std::path::PathBuf;
+
+use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use futures::{Stream, StreamExt};
+use ratatui::Terminal;
+use ratatui::backend::Backend;
+use ratatui::style::{Modifier, Style};
+use ratatui::widgets::Block;
+use ratatui_textarea::{TextArea, WrapMode};
+
+use crate::config::{Config, Credentials};
+use crate::events::{AgentEvent, EventReceivers, EventSenders, FsEvent, JobEvent};
+use crate::transcript::{Entry, NoticeLevel, Scroll, StreamState, Transcript};
+use crate::ui;
+
+/// What the status line shows.
+#[derive(Debug, Clone)]
+pub struct Status {
+    pub project: String,
+    pub model: String,
+    pub api: String,
+    pub sandbox: String,
+}
+
+pub struct App {
+    pub config: Config,
+    pub credentials: Credentials,
+    pub project_root: PathBuf,
+    pub senders: EventSenders,
+    pub status: Status,
+    pub transcript: Transcript,
+    pub scroll: Scroll,
+    pub input: TextArea<'static>,
+    pub should_quit: bool,
+    /// Transcript size from the last render, for scrolling: (total lines, viewport rows).
+    pub(crate) transcript_metrics: (usize, usize),
+}
+
+impl App {
+    pub fn new(
+        config: Config,
+        credentials: Credentials,
+        project_root: PathBuf,
+        status: Status,
+        senders: EventSenders,
+    ) -> Self {
+        Self {
+            config,
+            credentials,
+            project_root,
+            senders,
+            status,
+            transcript: Transcript::default(),
+            scroll: Scroll::default(),
+            input: new_input(),
+            should_quit: false,
+            transcript_metrics: (0, 0),
+        }
+    }
+
+    pub fn handle_terminal_event(&mut self, event: Event) {
+        match event {
+            Event::Key(key) if key.kind != KeyEventKind::Release => self.handle_key(key),
+            Event::Paste(text) => {
+                self.input
+                    .insert_str(text.replace("\r\n", "\n").replace('\r', "\n"));
+            }
+            _ => {}
+        }
+    }
+
+    fn handle_key(&mut self, key: KeyEvent) {
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        let shift = key.modifiers.contains(KeyModifiers::SHIFT);
+        let alt = key.modifiers.contains(KeyModifiers::ALT);
+        let (total, height) = self.transcript_metrics;
+        let page = height.saturating_sub(1).max(1);
+
+        match key.code {
+            KeyCode::Char('c') if ctrl => self.should_quit = true,
+            KeyCode::Enter if shift || alt => self.input.insert_newline(),
+            KeyCode::Char('j') if ctrl => self.input.insert_newline(),
+            KeyCode::Enter => self.submit(),
+            KeyCode::PageUp => self.scroll.up(page, total, height),
+            KeyCode::PageDown => self.scroll.down(page, total, height),
+            KeyCode::Up if shift => self.scroll.up(1, total, height),
+            KeyCode::Down if shift => self.scroll.down(1, total, height),
+            KeyCode::Home if ctrl => self.scroll.top(total, height),
+            KeyCode::End if ctrl => self.scroll.bottom(),
+            _ => {
+                self.input.input(key);
+            }
+        }
+    }
+
+    fn submit(&mut self) {
+        let text = self.input.lines().join("\n");
+        if text.trim().is_empty() {
+            return;
+        }
+        self.input = new_input();
+        self.transcript.push(Entry::User { text });
+        self.transcript.push(Entry::Notice {
+            text: "No agent is connected yet.".into(),
+            level: NoticeLevel::Info,
+        });
+        self.scroll.bottom();
+    }
+
+    pub fn handle_agent_event(&mut self, event: AgentEvent) {
+        match event {
+            AgentEvent::AssistantDelta(delta) => self.transcript.append_assistant(&delta),
+            AgentEvent::AssistantDone { interrupted } => {
+                self.transcript.finish_assistant(if interrupted {
+                    StreamState::Interrupted
+                } else {
+                    StreamState::Complete
+                })
+            }
+            AgentEvent::ToolCall { id, name, summary } => {
+                self.transcript.finish_assistant(StreamState::Complete);
+                self.transcript.push(Entry::ToolCall { id, name, summary })
+            }
+            AgentEvent::ToolResult {
+                call_id,
+                output,
+                is_error,
+            } => self.transcript.push(Entry::ToolResult {
+                call_id,
+                output,
+                is_error,
+            }),
+            AgentEvent::Error(text) => {
+                self.transcript.finish_assistant(StreamState::Interrupted);
+                self.transcript.push(Entry::Notice {
+                    text,
+                    level: NoticeLevel::Error,
+                })
+            }
+        }
+    }
+
+    pub fn handle_fs_event(&mut self, event: FsEvent) {
+        match event {
+            FsEvent::Changed(paths) => self.transcript.push(Entry::Notice {
+                text: format!("{} file(s) changed", paths.len()),
+                level: NoticeLevel::Info,
+            }),
+        }
+    }
+
+    pub fn handle_job_event(&mut self, event: JobEvent) {
+        match event {
+            JobEvent::Finished { id, exit_code } => self.transcript.push(Entry::Notice {
+                text: match exit_code {
+                    Some(code) => format!("job {id} exited with status {code}"),
+                    None => format!("job {id} was terminated"),
+                },
+                level: NoticeLevel::Info,
+            }),
+        }
+    }
+}
+
+fn new_input() -> TextArea<'static> {
+    let mut input = TextArea::default();
+    input.set_block(
+        Block::bordered()
+            .border_style(Style::new().add_modifier(Modifier::DIM))
+            .title(" message "),
+    );
+    input.set_cursor_line_style(Style::new());
+    input.set_wrap_mode(WrapMode::WordOrGlyph);
+    input.set_placeholder_text("Ask about the codebase…");
+    input
+}
+
+/// The central event loop: redraws, then waits for the next terminal, agent,
+/// filesystem or job event, until the app asks to quit or input ends.
+pub async fn run<B, S>(
+    terminal: &mut Terminal<B>,
+    app: &mut App,
+    mut terminal_events: S,
+    mut events: EventReceivers,
+) -> anyhow::Result<()>
+where
+    B: Backend,
+    B::Error: Send + Sync + 'static,
+    S: Stream<Item = io::Result<Event>> + Unpin,
+{
+    loop {
+        terminal.draw(|frame| ui::render(frame, app))?;
+
+        tokio::select! {
+            event = terminal_events.next() => match event {
+                Some(event) => app.handle_terminal_event(event?),
+                None => return Ok(()),
+            },
+            Some(event) = events.agent.recv() => app.handle_agent_event(event),
+            Some(event) = events.fs.recv() => app.handle_fs_event(event),
+            Some(event) = events.job.recv() => app.handle_job_event(event),
+        }
+
+        if app.should_quit {
+            return Ok(());
+        }
+    }
+}

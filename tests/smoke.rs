@@ -1,0 +1,184 @@
+//! Headless end-to-end runs of the event loop against ratatui's test backend.
+
+use std::io;
+use std::path::PathBuf;
+use std::time::Duration;
+
+use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+use futures::channel::mpsc;
+use ratatui::Terminal;
+use ratatui::backend::TestBackend;
+
+use saddle::app::{self, App, Status};
+use saddle::config::{Config, Credentials};
+use saddle::events::{self, AgentEvent, EventSenders};
+use saddle::transcript::{Entry, StreamState};
+
+fn app(senders: EventSenders) -> App {
+    let path = PathBuf::from("/cfg");
+    let config = Config::parse(
+        "model = \"test-model\"\napi = \"messages\"\nbase_url = \"https://llm.test\"\n",
+        &path,
+    )
+    .unwrap();
+    let credentials = Credentials::parse("[inference]\napi_key = \"k\"\n", &path).unwrap();
+    App::new(
+        config,
+        credentials,
+        PathBuf::from("/src/project"),
+        Status {
+            project: "~/src/project".into(),
+            model: "test-model".into(),
+            api: "messages".into(),
+            sandbox: "not available".into(),
+        },
+        senders,
+    )
+}
+
+fn key(code: KeyCode, modifiers: KeyModifiers) -> io::Result<Event> {
+    Ok(Event::Key(KeyEvent::new(code, modifiers)))
+}
+
+fn typed(text: &str) -> Vec<io::Result<Event>> {
+    text.chars()
+        .map(|c| key(KeyCode::Char(c), KeyModifiers::NONE))
+        .collect()
+}
+
+fn screen(terminal: &Terminal<TestBackend>) -> String {
+    let buffer = terminal.backend().buffer();
+    let width = usize::from(buffer.area.width);
+    buffer
+        .content
+        .chunks(width)
+        .map(|row| row.iter().map(|cell| cell.symbol()).collect::<String>())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+async fn settle() {
+    tokio::time::sleep(Duration::from_millis(20)).await;
+}
+
+#[tokio::test]
+async fn conversation_renders_through_the_event_loop() {
+    let (senders, receivers) = events::channels();
+    let agent = senders.agent.clone();
+    let mut app = app(senders);
+    let (input, terminal_events) = mpsc::unbounded();
+
+    let handle = tokio::spawn(async move {
+        let mut terminal = Terminal::new(TestBackend::new(80, 20)).unwrap();
+        app::run(&mut terminal, &mut app, terminal_events, receivers)
+            .await
+            .unwrap();
+        (terminal, app)
+    });
+
+    for event in typed("first line") {
+        input.unbounded_send(event).unwrap();
+    }
+    input
+        .unbounded_send(key(KeyCode::Enter, KeyModifiers::SHIFT))
+        .unwrap();
+    for event in typed("second") {
+        input.unbounded_send(event).unwrap();
+    }
+    input
+        .unbounded_send(Ok(Event::Paste(" pasted\r\nmore".into())))
+        .unwrap();
+    input
+        .unbounded_send(key(KeyCode::Enter, KeyModifiers::NONE))
+        .unwrap();
+    settle().await;
+
+    agent
+        .send(AgentEvent::AssistantDelta("Streaming ".into()))
+        .unwrap();
+    agent
+        .send(AgentEvent::AssistantDelta("reply".into()))
+        .unwrap();
+    agent
+        .send(AgentEvent::AssistantDone { interrupted: false })
+        .unwrap();
+    settle().await;
+
+    input.unbounded_send(Ok(Event::Resize(60, 15))).unwrap();
+    input
+        .unbounded_send(key(KeyCode::Char('c'), KeyModifiers::CONTROL))
+        .unwrap();
+
+    let (terminal, app) = tokio::time::timeout(Duration::from_secs(5), handle)
+        .await
+        .expect("event loop did not quit")
+        .unwrap();
+
+    let entries: Vec<_> = app.transcript.entries().cloned().collect();
+    assert_eq!(
+        entries[0],
+        Entry::User {
+            text: "first line\nsecond pasted\nmore".into()
+        }
+    );
+    assert_eq!(
+        entries.last().unwrap(),
+        &Entry::Assistant {
+            text: "Streaming reply".into(),
+            state: StreamState::Complete
+        }
+    );
+    assert!(app.input.is_empty());
+
+    let screen = screen(&terminal);
+    assert!(screen.contains("› first line"), "{screen}");
+    assert!(screen.contains("  second pasted"), "{screen}");
+    assert!(screen.contains("● Streaming reply"), "{screen}");
+    assert!(screen.contains("~/src/project"), "{screen}");
+    assert!(screen.contains("test-model (messages)"), "{screen}");
+    assert!(screen.contains("sandbox: not available"), "{screen}");
+}
+
+#[tokio::test]
+async fn loop_ends_when_terminal_input_ends() {
+    let (senders, receivers) = events::channels();
+    let mut app = app(senders);
+    let mut terminal = Terminal::new(TestBackend::new(40, 10)).unwrap();
+    let terminal_events = futures::stream::iter(typed("hi"));
+    app::run(&mut terminal, &mut app, terminal_events, receivers)
+        .await
+        .unwrap();
+    assert_eq!(app.input.lines(), ["hi"]);
+    assert!(app.transcript.is_empty());
+}
+
+#[tokio::test]
+async fn page_up_scrolls_away_from_the_bottom() {
+    let (senders, receivers) = events::channels();
+    let agent = senders.agent.clone();
+    let mut app = app(senders);
+    for i in 0..50 {
+        agent.send(AgentEvent::Error(format!("line {i}"))).unwrap();
+    }
+    let (input, terminal_events) = mpsc::unbounded();
+    let handle = tokio::spawn(async move {
+        let mut terminal = Terminal::new(TestBackend::new(100, 12)).unwrap();
+        app::run(&mut terminal, &mut app, terminal_events, receivers)
+            .await
+            .unwrap();
+        (terminal, app)
+    });
+    settle().await;
+    input
+        .unbounded_send(key(KeyCode::PageUp, KeyModifiers::NONE))
+        .unwrap();
+    settle().await;
+    input
+        .unbounded_send(key(KeyCode::Char('c'), KeyModifiers::CONTROL))
+        .unwrap();
+    let (terminal, app) = handle.await.unwrap();
+    assert!(!app.scroll.is_following());
+    let screen = screen(&terminal);
+    assert!(screen.contains("[scrolled]"), "{screen}");
+    assert!(!screen.contains("line 49"), "{screen}");
+}

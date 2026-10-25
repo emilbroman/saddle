@@ -1,10 +1,12 @@
-//! Tools the agent can call. Every tool is read-only; later slices add the
-//! sandboxed shell and LSP queries through the same [`Tool`] trait.
+//! Tools the agent can call. None of them can write to the project: the file
+//! tools only read, and the shell runs under the OS sandbox
+//! ([`crate::sandbox`]). LSP queries arrive through the same [`Tool`] trait.
 
 pub mod fs;
 mod grep;
 mod list;
 mod read_file;
+pub mod shell;
 pub mod web_search;
 
 use std::sync::Arc;
@@ -12,6 +14,7 @@ use std::sync::Arc;
 use futures::future::BoxFuture;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
+use tokio_util::sync::CancellationToken;
 
 pub use fs::ProjectFs;
 pub use grep::Grep;
@@ -54,6 +57,24 @@ pub trait Tool: Send + Sync {
     /// One-line rendering of a call for the transcript.
     fn summary(&self, args: &Value) -> String;
     fn call(&self, args: Value) -> BoxFuture<'static, ToolOutput>;
+
+    /// For tools with something useful to report when the turn is
+    /// interrupted: a call that watches `interrupt` itself and then returns
+    /// promptly with partial results, instead of being dropped.
+    fn call_interruptible(
+        &self,
+        _args: Value,
+        _interrupt: CancellationToken,
+    ) -> Option<BoxFuture<'static, ToolOutput>> {
+        None
+    }
+}
+
+/// A running tool call; see [`Registry::start`].
+pub struct Call {
+    pub future: BoxFuture<'static, ToolOutput>,
+    /// The future returns by itself soon after the interrupt fires.
+    pub interruptible: bool,
 }
 
 #[derive(Clone, Default)]
@@ -114,20 +135,36 @@ impl Registry {
     /// Runs a call. Unknown tools and failures become error outputs for the
     /// model; the result is always capped at [`MAX_OUTPUT_BYTES`].
     pub fn call(&self, name: &str, args: Value) -> BoxFuture<'static, ToolOutput> {
+        self.start(name, args, None).future
+    }
+
+    /// Like [`Self::call`], letting tools that support it observe `interrupt`.
+    pub fn start(&self, name: &str, args: Value, interrupt: Option<CancellationToken>) -> Call {
         let Some(tool) = self.get(name) else {
             let known: Vec<_> = self.tools.iter().map(|t| t.name()).collect();
             let output = ToolOutput::error(format!(
                 "unknown tool {name:?}; available tools: {}",
                 known.join(", ")
             ));
-            return Box::pin(async move { output });
+            return Call {
+                future: Box::pin(async move { output }),
+                interruptible: true,
+            };
         };
-        let call = tool.call(args);
-        Box::pin(async move {
-            let mut output = call.await;
-            output.content = truncate(&output.content, MAX_OUTPUT_BYTES);
-            output
-        })
+        let (call, interruptible) = match interrupt
+            .and_then(|interrupt| tool.call_interruptible(args.clone(), interrupt))
+        {
+            Some(call) => (call, true),
+            None => (tool.call(args), false),
+        };
+        Call {
+            future: Box::pin(async move {
+                let mut output = call.await;
+                output.content = truncate(&output.content, MAX_OUTPUT_BYTES);
+                output
+            }),
+            interruptible,
+        }
     }
 }
 

@@ -9,6 +9,8 @@ use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
+pub use crate::sandbox::BackendChoice;
+
 pub const CONFIG_FILE: &str = "config.toml";
 pub const CREDENTIALS_FILE: &str = "credentials.toml";
 
@@ -132,6 +134,11 @@ pub struct SandboxConfig {
     /// Keyed by project root (absolute or `~/`-prefixed).
     #[serde(default)]
     pub projects: BTreeMap<String, ProjectSandbox>,
+    #[serde(default)]
+    pub backend: BackendChoice,
+    /// Extra environment variable names passed into sandboxed commands.
+    #[serde(default)]
+    pub env: Vec<String>,
 }
 
 impl Default for SandboxConfig {
@@ -139,6 +146,8 @@ impl Default for SandboxConfig {
         Self {
             writable: default_global_writable(),
             projects: BTreeMap::new(),
+            backend: BackendChoice::default(),
+            env: Vec::new(),
         }
     }
 }
@@ -231,6 +240,26 @@ impl Config {
             }
             if server.file_types.is_empty() {
                 return Err(format!("`lsp.{language}.file_types` must not be empty"));
+            }
+        }
+        for path in &self.sandbox.writable {
+            if !(path.starts_with('/') || path == "~" || path.starts_with("~/")) {
+                return Err(format!(
+                    "`sandbox.writable` entries must be absolute or start with ~/ (got {path:?})"
+                ));
+            }
+        }
+        for (root, project) in &self.sandbox.projects {
+            for path in &project.writable {
+                if Path::new(path).is_absolute()
+                    || Path::new(path)
+                        .components()
+                        .any(|c| matches!(c, std::path::Component::ParentDir))
+                {
+                    return Err(format!(
+                        "`sandbox.projects.\"{root}\".writable` entries must be relative to the project without `..` (got {path:?})"
+                    ));
+                }
             }
         }
         if self.batching.quiet_ms > self.batching.max_window_ms {
@@ -443,6 +472,8 @@ root_markers = ["Cargo.toml"]
 
 [sandbox]
 writable = ["~/.cargo", "/opt/cache"]
+backend = "bwrap"
+env = ["JAVA_OPTS"]
 
 [sandbox.projects."~/src/saddle"]
 writable = ["target", "build"]
@@ -471,6 +502,8 @@ num_results = 8
         assert_eq!(rust.file_types, ["rs"]);
         assert_eq!(rust.root_markers, ["Cargo.toml"]);
         assert_eq!(config.sandbox.writable, ["~/.cargo", "/opt/cache"]);
+        assert_eq!(config.sandbox.backend, BackendChoice::Bwrap);
+        assert_eq!(config.sandbox.env, ["JAVA_OPTS"]);
         assert_eq!(
             config.sandbox.projects["~/src/saddle"].writable,
             ["target", "build"]
@@ -543,6 +576,14 @@ num_results = 8
             (
                 format!("{CONFIG_EXAMPLE}\n[batching]\nquiet_ms = 5\nmax_window_ms = 1\n"),
                 "batching.quiet_ms",
+            ),
+            (
+                format!("{CONFIG_EXAMPLE}\n[sandbox]\nwritable = [\"cache\"]\n"),
+                "sandbox.writable",
+            ),
+            (
+                format!("{CONFIG_EXAMPLE}\n[sandbox.projects.\"/p\"]\nwritable = [\"../out\"]\n"),
+                "sandbox.projects",
             ),
             (
                 format!("{CONFIG_EXAMPLE}\n[search]\nnum_results = 0\n"),

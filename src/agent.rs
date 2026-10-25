@@ -15,6 +15,9 @@ use crate::tools::Registry;
 /// Model responses per turn before the loop gives up and hands back to the user.
 pub const MAX_ROUNDS: usize = 50;
 
+/// How long an interruptible tool may take to wrap up after an interrupt.
+const INTERRUPT_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
+
 const INTERRUPTED_TOOL: &str = "Interrupted: the user stopped this turn before the tool finished.";
 
 pub struct Agent {
@@ -147,11 +150,19 @@ impl Agent {
                     name: call.fn_name.clone(),
                     summary: self.tools.summary(&call.fn_name, &call.fn_arguments),
                 });
-                let run = self.tools.call(&call.fn_name, call.fn_arguments.clone());
-                let output = tokio::select! {
-                    biased;
-                    _ = cancel.cancelled() => None,
-                    output = run => Some(output),
+                let run = self.tools.start(
+                    &call.fn_name,
+                    call.fn_arguments.clone(),
+                    Some(cancel.clone()),
+                );
+                let output = if run.interruptible {
+                    run_interruptible(run.future, cancel).await
+                } else {
+                    tokio::select! {
+                        biased;
+                        _ = cancel.cancelled() => None,
+                        output = run.future => Some(output),
+                    }
                 };
                 let Some(output) = output else {
                     // Every call needs a response or the next request is rejected.
@@ -166,6 +177,20 @@ impl Agent {
                     self.push_tool_responses(responses);
                     return TurnOutcome::Interrupted;
                 };
+                if cancel.is_cancelled() {
+                    // The tool reported its partial result; the rest never ran.
+                    self.emit(AgentEvent::ToolResult {
+                        call_id: call.call_id.clone(),
+                        output: output.content.clone(),
+                        is_error: output.is_error,
+                    });
+                    responses.push(ToolResponse::new(&call.call_id, output.content));
+                    for pending in &calls[responses.len()..] {
+                        responses.push(ToolResponse::new(&pending.call_id, INTERRUPTED_TOOL));
+                    }
+                    self.push_tool_responses(responses);
+                    return TurnOutcome::Interrupted;
+                }
                 self.emit(AgentEvent::ToolResult {
                     call_id: call.call_id.clone(),
                     output: output.content.clone(),
@@ -201,6 +226,20 @@ impl Agent {
                 responses,
             )));
     }
+}
+
+/// Awaits a tool call that handles interrupts itself, dropping it only if it
+/// fails to return within [`INTERRUPT_GRACE`] of the interrupt.
+async fn run_interruptible(
+    future: futures::future::BoxFuture<'static, crate::tools::ToolOutput>,
+    cancel: &CancellationToken,
+) -> Option<crate::tools::ToolOutput> {
+    tokio::pin!(future);
+    tokio::select! {
+        output = &mut future => return Some(output),
+        _ = cancel.cancelled() => {}
+    }
+    tokio::time::timeout(INTERRUPT_GRACE, future).await.ok()
 }
 
 /// Talks to an [`Agent`] running on its own task.
@@ -266,6 +305,7 @@ mod tests {
         let mut tools =
             Registry::read_only(ProjectFs::new(dir.path()).unwrap(), Observed::default());
         tools.register(Slow);
+        tools.register(Watcher);
         let provider = ScriptedProvider::new(responses);
         let (tx, events) = mpsc::unbounded_channel();
         let agent = Agent::new(Arc::new(provider.clone()), tools, "system".into(), tx);
@@ -308,6 +348,62 @@ mod tests {
         }
     }
 
+    /// Waits until interrupted, then reports what it saw.
+    struct Watcher;
+    impl Tool for Watcher {
+        fn name(&self) -> &'static str {
+            "watcher"
+        }
+        fn description(&self) -> &'static str {
+            "returns partial results on interrupt"
+        }
+        fn schema(&self) -> Value {
+            json!({"type": "object"})
+        }
+        fn summary(&self, _: &Value) -> String {
+            String::new()
+        }
+        fn call(&self, _: Value) -> BoxFuture<'static, ToolOutput> {
+            Box::pin(futures::future::pending())
+        }
+        fn call_interruptible(
+            &self,
+            _: Value,
+            interrupt: CancellationToken,
+        ) -> Option<BoxFuture<'static, ToolOutput>> {
+            Some(Box::pin(async move {
+                interrupt.cancelled().await;
+                ToolOutput::ok("partial: still running")
+            }))
+        }
+    }
+
+    #[tokio::test]
+    async fn interruptible_tool_reports_partial_result() {
+        let mut h = harness(vec![vec![
+            tool_call("a", "watcher", json!({})),
+            tool_call("b", "list", json!({})),
+        ]]);
+        let cancel = CancellationToken::new();
+        let trigger = cancel.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            trigger.cancel();
+        });
+        let outcome = h.agent.submit("go".into(), &cancel).await;
+        assert_eq!(outcome, TurnOutcome::Interrupted);
+        let events = drain(&mut h.events);
+        assert!(events.contains(&AgentEvent::ToolResult {
+            call_id: "a".into(),
+            output: "partial: still running".into(),
+            is_error: false,
+        }));
+        let responses = h.agent.messages()[2].content.tool_responses();
+        assert_eq!(responses[0].content, "partial: still running");
+        assert_eq!(responses[1].call_id, "b");
+        assert_eq!(responses[1].content, INTERRUPTED_TOOL);
+    }
+
     #[tokio::test]
     async fn text_turn_streams_and_completes() {
         let mut h = harness(vec![vec![text("Hel"), text("lo")]]);
@@ -332,7 +428,10 @@ mod tests {
             .flatten()
             .map(|t| t.name.to_string())
             .collect();
-        assert_eq!(tools, ["read_file", "list", "glob", "grep", "slow"]);
+        assert_eq!(
+            tools,
+            ["read_file", "list", "glob", "grep", "slow", "watcher"]
+        );
     }
 
     #[tokio::test]

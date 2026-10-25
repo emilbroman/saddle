@@ -106,7 +106,7 @@ max_window_ms = 30000                    # never hold a batch longer than this (
 
 [search]                                 # web search via Exa
 enabled = true                           # default true; needs an Exa key
-num_results = 5                          # 1–100, default 5
+num_results = 5                          # results per search unless the agent asks; 1–10, default 5
 ```
 
 The adapter is chosen by `api`, never inferred from the model name. Against
@@ -127,13 +127,14 @@ including in parse errors.
 api_key = "sk-..."                       # required
 
 [exa]
-api_key = "..."                          # optional; web search is unavailable without it
+api_key = "..."                          # optional; Exa key for web search
 ```
 
 ## Agent tools
 
-The agent cannot write anything. Its tools are read-only and confined to the
-project root: paths that escape it, through `..` or symlinks, are refused.
+The agent cannot write anything. Its tools are read-only. The file tools are
+confined to the project root: paths that escape it, through `..` or symlinks,
+are refused.
 
 | Tool        | What it does                                                                 |
 | ----------- | ---------------------------------------------------------------------------- |
@@ -141,10 +142,20 @@ project root: paths that escape it, through `..` or symlinks, are refused.
 | `list`      | Lists one directory level.                                                   |
 | `glob`      | Finds files by glob pattern, recursively.                                    |
 | `grep`      | Searches file contents with a regular expression; at most 200 matches.       |
+| `search_web` | Searches the web through Exa; title, URL, date and an excerpt for up to 10 results, optionally limited to the past day, week, month or year. |
 
 `list`, `glob` and `grep` respect `.gitignore` and skip `.git`; none of them
 follows symlinks. Every tool result is capped at 50 KiB with a notice saying
 what was cut.
+
+`search_web` calls `https://api.exa.ai/search` directly with the key in
+`[exa] api_key` of `credentials.toml` (create one at
+<https://dashboard.exa.ai/api-keys>). Without a key the tool is left out of
+the agent's tool list and the status line says so; `[search] enabled = false`
+turns it off silently. Each search costs Exa credits. Results are framed to the
+model as untrusted source material, not instructions. Requests time out after
+30 s; key, credit, rate-limit and network errors appear as the tool's result in
+the transcript. The agent cannot fetch whole pages.
 
 The system prompt is `src/prompts/system.md`.
 
@@ -162,8 +173,8 @@ A single crate with a library (`src/lib.rs`) and a thin binary (`src/main.rs`):
   interrupts the running turn.
 - `provider` — streaming inference behind a `Provider` trait: `genai` against
   the configured endpoint, and a scripted provider for tests.
-- `tools` — the `Tool` trait and registry, root confinement, and the read-only
-  file tools.
+- `tools` — the `Tool` trait and registry, root confinement, the read-only
+  file tools and Exa web search.
 - `watch` — the file watcher (`notify` with its full debouncer), ignore
   filtering, the batching policy, the record of what Saddle last saw of each
   file, and the change event sent to the agent. Change sets also go to

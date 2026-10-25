@@ -24,6 +24,8 @@ pub struct Status {
     pub model: String,
     pub api: String,
     pub sandbox: String,
+    /// Shown when web search is enabled in config but cannot be offered.
+    pub web_search: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

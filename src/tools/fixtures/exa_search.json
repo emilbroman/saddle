@@ -1,0 +1,37 @@
+{
+  "resolvedSearchType": "",
+  "results": [
+    {
+      "id": "https://docs.rs/tokio/latest/tokio/macro.select.html",
+      "title": "select in tokio - Rust",
+      "url": "https://docs.rs/tokio/latest/tokio/macro.select.html",
+      "highlights": [
+        "## § Cancellation safety\n\nWhen using `select!` in a loop to receive messages from multiple sources, you should make sure that the receive call is cancellation safe to avoid losing messages. This section goes through various common methods and describes whether they are cancel safe. The lists in this section are not exhaustive.\n\nCancellation safety describes what happens when a future is dropped before it completes. Whether something is cancellation safe depends on the behavior of the future passed to `select!`, which may come from an async method, an async expression, or another future-producing operation.\n\nThe following methods are cancellation safe:\n\n- `tokio::sync::mpsc::Receiver::recv`\n- `tokio::sync::mpsc::UnboundedReceiver::recv`\n- `tokio::sync::broadcast::Receiver::recv`\n- `tokio::sync::watch::Receiver::changed`\n- `tokio::net::TcpListener::accept`\n- `tokio::net::UnixListener::accept`\n- `tokio::signal::unix::Signal::recv`\n- `tokio::io::AsyncReadExt::read` on any `AsyncRead`\n- `tokio::io::AsyncReadExt::read_buf` on any `AsyncRead`\n- `tokio::io::AsyncWriteExt::write` on any `AsyncWrite`\n- `tokio::io::AsyncWriteExt::write_buf` on any `AsyncWrite`\n- `tokio_stream::StreamExt::next` on any `Stream`\n- `futures::stream::StreamExt::next` on any `Stream`\n\nThe following methods are not cancellation safe and can lead to loss of data:\n\n- `tokio::io::AsyncReadExt::read_exact`\n- `tokio::io::AsyncReadExt::read_to_end`\n- `tokio::io::AsyncReadExt::read_to_string`\n- `tokio::io::AsyncWriteExt::write_all`\n\nThe following methods are not cancellation safe because they use a queue for fairness and cancellation makes you lose your place in the queue:\n\n- `tokio::sync::Mutex::lock`\n- `tokio::sync::RwLock::read`\n- `tokio::sync::RwLock::write`\n- `tokio::sync::Semaphore::acquire`\n- `tokio::sync::Notify::notified`\n\nTo determine whether your own methods are cancellation safe, look for the location of uses of `.await`. This is because when an asynchronous method is cancelled, that always happens at an `.await`. If your function behaves correctly even if it is restarted while waiting at an `.await`, then it is cancellation safe.\n\nCancellation safety can be defined in the following way: If you have a future that has not yet completed, then it must be a no-op to drop that future and recreate it. This definition is motivated by the situation where a `select!` is used in a loop. Without this guarantee, you would lose your progress when another branch completes and you restart the `select!` by going around the loop.\n\nBe aware that cancelling something that is not cancellation safe is not necessarily wrong. For example, if you are cancelling a task because the application is shutting down, then you probably don’t care that partially read data is lost."
+      ]
+    },
+    {
+      "id": "https://github.com/tokio-rs/tokio/blob/master/tokio/src/macros/select.rs",
+      "title": "tokio/src/macros/select.rs",
+      "url": "https://github.com/tokio-rs/tokio/blob/master/tokio/src/macros/select.rs",
+      "highlights": [
+        "/// loop {\n /// tokio::select! {\n /// // If you run this example without `biased;\n...\n1 => {\n /// count += 1;\n /// assert_eq!(count, 1);\n /// }\n /// _ = async {}, if count < 2 => {\n /// count += 1;\n /// assert_eq!(count, 2);\n /// }"
+      ]
+    },
+    {
+      "id": "https://tokio.rs/tokio/tutorial/select",
+      "title": "Select | Tokio - An asynchronous Rust runtime",
+      "url": "https://tokio.rs/tokio/tutorial/select",
+      "publishedDate": "2026-03-18T00:00:00.000Z",
+      "highlights": [
+        "is performed by dropping a future. Recall from \"Async in depth\", async Rust operation are implemented using futures and futures are lazy. The operation only proceeds when the future is polled. If the future is dropped, the operation cannot proceed because"
+      ]
+    }
+  ],
+  "searchTime": 923.6,
+  "costDollars": {
+    "total": 0.007,
+    "search": {
+      "neural": 0.007
+    }
+  }
+}

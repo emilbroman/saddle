@@ -37,6 +37,7 @@ fn app(senders: EventSenders) -> App {
             model: "test-model".into(),
             api: "messages".into(),
             sandbox: "not available".into(),
+            web_search: None,
         },
         senders,
     )

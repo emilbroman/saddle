@@ -236,8 +236,11 @@ impl Config {
         if self.batching.quiet_ms > self.batching.max_window_ms {
             return Err("`batching.quiet_ms` must not exceed `batching.max_window_ms`".into());
         }
-        if !(1..=100).contains(&self.search.num_results) {
-            return Err("`search.num_results` must be between 1 and 100".into());
+        if !(1..=crate::tools::web_search::MAX_RESULTS).contains(&self.search.num_results) {
+            return Err(format!(
+                "`search.num_results` must be between 1 and {}",
+                crate::tools::web_search::MAX_RESULTS
+            ));
         }
         Ok(())
     }
@@ -280,6 +283,10 @@ impl Config {
 pub struct Secret(String);
 
 impl Secret {
+    pub fn new(value: impl Into<String>) -> Self {
+        Self(value.into())
+    }
+
     pub fn expose(&self) -> &str {
         &self.0
     }

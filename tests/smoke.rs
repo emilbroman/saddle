@@ -9,10 +9,15 @@ use futures::channel::mpsc;
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 
-use saddle::app::{self, App, Status};
+use std::sync::Arc;
+
+use saddle::agent::{Agent, AgentHandle};
+use saddle::app::{self, Activity, App, Status};
 use saddle::config::{Config, Credentials};
 use saddle::events::{self, AgentEvent, EventSenders};
-use saddle::transcript::{Entry, StreamState};
+use saddle::provider::scripted::{ScriptedProvider, Step, text, tool_call};
+use saddle::tools::{ProjectFs, Registry};
+use saddle::transcript::{Entry, NoticeLevel, StreamState};
 
 fn app(senders: EventSenders) -> App {
     let path = PathBuf::from("/cfg");
@@ -181,4 +186,108 @@ async fn page_up_scrolls_away_from_the_bottom() {
     let screen = screen(&terminal);
     assert!(screen.contains("[scrolled]"), "{screen}");
     assert!(!screen.contains("line 49"), "{screen}");
+}
+
+#[tokio::test]
+async fn agent_turn_runs_tools_and_can_be_interrupted() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("hello.txt"), "hi there\n").unwrap();
+    let provider = ScriptedProvider::new([
+        vec![
+            text("Reading."),
+            tool_call("c1", "read_file", serde_json::json!({"path": "hello.txt"})),
+        ],
+        vec![text("It says hi.")],
+        vec![text("A long answer"), Step::Hang],
+    ]);
+
+    let (senders, receivers) = events::channels();
+    let agent = Agent::new(
+        Arc::new(provider.clone()),
+        Registry::read_only(ProjectFs::new(dir.path()).unwrap()),
+        "system".into(),
+        senders.agent.clone(),
+    );
+    let mut app = app(senders);
+    app.attach_agent(AgentHandle::spawn(agent));
+
+    let (input, terminal_events) = mpsc::unbounded();
+    let handle = tokio::spawn(async move {
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        app::run(&mut terminal, &mut app, terminal_events, receivers)
+            .await
+            .unwrap();
+        (terminal, app)
+    });
+    let send = |events: Vec<io::Result<Event>>| {
+        for event in events {
+            input.unbounded_send(event).unwrap();
+        }
+    };
+
+    send(typed("what is in hello.txt"));
+    send(vec![key(KeyCode::Enter, KeyModifiers::NONE)]);
+    settle().await;
+    send(typed("next"));
+    send(vec![key(KeyCode::Enter, KeyModifiers::NONE)]);
+    settle().await;
+    // Busy: Enter keeps the draft instead of sending it.
+    send(typed("draft"));
+    send(vec![key(KeyCode::Enter, KeyModifiers::NONE)]);
+    settle().await;
+    send(vec![key(KeyCode::Esc, KeyModifiers::NONE)]);
+    settle().await;
+    send(vec![key(KeyCode::Char('c'), KeyModifiers::CONTROL)]);
+
+    let (terminal, app) = tokio::time::timeout(Duration::from_secs(5), handle)
+        .await
+        .expect("event loop did not quit")
+        .unwrap();
+
+    let entries: Vec<_> = app.transcript.entries().cloned().collect();
+    assert_eq!(
+        entries,
+        [
+            Entry::User {
+                text: "what is in hello.txt".into()
+            },
+            Entry::Assistant {
+                text: "Reading.".into(),
+                state: StreamState::Complete
+            },
+            Entry::ToolCall {
+                id: "c1".into(),
+                name: "read_file".into(),
+                summary: "hello.txt".into()
+            },
+            Entry::ToolResult {
+                call_id: "c1".into(),
+                output: "1\thi there".into(),
+                is_error: false
+            },
+            Entry::Assistant {
+                text: "It says hi.".into(),
+                state: StreamState::Complete
+            },
+            Entry::User {
+                text: "next".into()
+            },
+            Entry::Assistant {
+                text: "A long answer".into(),
+                state: StreamState::Interrupted
+            },
+            Entry::Notice {
+                text: "Interrupted.".into(),
+                level: NoticeLevel::Info
+            },
+        ]
+    );
+    assert_eq!(app.activity, Activity::Idle);
+    assert_eq!(app.input.lines(), ["draft"]);
+    assert_eq!(provider.requests.lock().unwrap().len(), 3);
+
+    let screen = screen(&terminal);
+    assert!(screen.contains("⚙ read_file hello.txt"), "{screen}");
+    assert!(screen.contains("↳ 1    hi there"), "{screen}");
+    assert!(screen.contains("[interrupted]"), "{screen}");
 }

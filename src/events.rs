@@ -6,8 +6,22 @@ use std::path::PathBuf;
 
 use tokio::sync::mpsc;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TurnOutcome {
+    /// The model stopped of its own accord.
+    Completed,
+    Interrupted,
+    Failed,
+    /// The turn hit the tool-round limit.
+    Exhausted,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AgentEvent {
+    TurnStarted,
+    TurnFinished(TurnOutcome),
+    /// The model is reasoning; the content itself is not shown.
+    Thinking,
     AssistantDelta(String),
     AssistantDone {
         interrupted: bool,
@@ -22,6 +36,7 @@ pub enum AgentEvent {
         output: String,
         is_error: bool,
     },
+    Notice(String),
     Error(String),
 }
 

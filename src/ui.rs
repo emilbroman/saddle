@@ -5,7 +5,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState};
 use unicode_width::UnicodeWidthStr;
 
-use crate::app::App;
+use crate::app::{Activity, App};
 
 const MAX_INPUT_ROWS: usize = 8;
 
@@ -84,11 +84,23 @@ fn render_status(frame: &mut Frame, app: &App, area: Rect) {
             base.fg(Color::Yellow),
         ),
     ];
+    match app.activity {
+        Activity::Idle => {}
+        Activity::Working => spans.push(Span::styled(
+            " working… Esc interrupts ",
+            base.fg(Color::Green).add_modifier(Modifier::BOLD),
+        )),
+        Activity::Thinking => spans.push(Span::styled(
+            " thinking… Esc interrupts ",
+            base.fg(Color::Green).add_modifier(Modifier::BOLD),
+        )),
+    }
     if !app.scroll.is_following() {
         spans.push(Span::styled(" [scrolled] ", base.fg(Color::Magenta)));
     }
 
-    let hints = " Enter send · Shift+Enter newline · PgUp/PgDn scroll · Ctrl+C quit ";
+    let hints =
+        " Enter send · Shift+Enter newline · PgUp/PgDn scroll · Ctrl+O tools · Ctrl+C quit ";
     let used: usize = spans.iter().map(|s| s.content.width()).sum();
     let free = usize::from(area.width).saturating_sub(used);
     if free > hints.width() {

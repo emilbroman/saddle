@@ -403,3 +403,62 @@ async fn saved_changes_interrupt_the_turn_and_start_a_new_one() {
     let screen = screen(&terminal);
     assert!(screen.contains("✎ 1 file changed: hello.txt"), "{screen}");
 }
+
+#[tokio::test]
+async fn lsp_status_reaches_the_status_line() {
+    use saddle::events::LspEvent;
+    use saddle::lsp::{ServerState, ServerStatus};
+
+    let (senders, receivers) = events::channels();
+    let lsp = senders.lsp.clone();
+    let mut app = app(senders);
+    let (input, terminal_events) = mpsc::unbounded();
+    let handle = tokio::spawn(async move {
+        let mut terminal = Terminal::new(TestBackend::new(120, 10)).unwrap();
+        app::run(&mut terminal, &mut app, terminal_events, receivers)
+            .await
+            .unwrap();
+        (terminal, app)
+    });
+
+    let status = |state| {
+        LspEvent::Status(vec![ServerStatus {
+            language: "rust".into(),
+            root: "/src/project".into(),
+            state,
+        }])
+    };
+    lsp.send(status(ServerState::Busy("Indexing".into())))
+        .unwrap();
+    lsp.send(status(ServerState::Restarting {
+        attempt: 1,
+        reason: "exited with exit status: 101".into(),
+    }))
+    .unwrap();
+    lsp.send(status(ServerState::Ready)).unwrap();
+    settle().await;
+    input
+        .unbounded_send(key(KeyCode::Char('c'), KeyModifiers::CONTROL))
+        .unwrap();
+
+    let (terminal, app) = tokio::time::timeout(Duration::from_secs(5), handle)
+        .await
+        .expect("event loop did not quit")
+        .unwrap();
+    let screen = screen(&terminal);
+    assert!(screen.contains("lsp: rust ✓"), "{screen}");
+    let notices: Vec<_> = app
+        .transcript
+        .entries()
+        .filter(|e| {
+            matches!(
+                e,
+                Entry::Notice {
+                    level: NoticeLevel::Error,
+                    ..
+                }
+            )
+        })
+        .collect();
+    assert_eq!(notices.len(), 1, "{notices:?}");
+}

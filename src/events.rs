@@ -55,11 +55,17 @@ pub enum JobEvent {
     Finished { id: u64, exit_code: Option<i32> },
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LspEvent {
+    Status(Vec<crate::lsp::ServerStatus>),
+}
+
 #[derive(Debug, Clone)]
 pub struct EventSenders {
     pub agent: mpsc::UnboundedSender<AgentEvent>,
     pub fs: mpsc::UnboundedSender<FsEvent>,
     pub job: mpsc::UnboundedSender<JobEvent>,
+    pub lsp: mpsc::UnboundedSender<LspEvent>,
 }
 
 #[derive(Debug)]
@@ -67,22 +73,26 @@ pub struct EventReceivers {
     pub agent: mpsc::UnboundedReceiver<AgentEvent>,
     pub fs: mpsc::UnboundedReceiver<FsEvent>,
     pub job: mpsc::UnboundedReceiver<JobEvent>,
+    pub lsp: mpsc::UnboundedReceiver<LspEvent>,
 }
 
 pub fn channels() -> (EventSenders, EventReceivers) {
     let (agent_tx, agent_rx) = mpsc::unbounded_channel();
     let (fs_tx, fs_rx) = mpsc::unbounded_channel();
     let (job_tx, job_rx) = mpsc::unbounded_channel();
+    let (lsp_tx, lsp_rx) = mpsc::unbounded_channel();
     (
         EventSenders {
             agent: agent_tx,
             fs: fs_tx,
             job: job_tx,
+            lsp: lsp_tx,
         },
         EventReceivers {
             agent: agent_rx,
             fs: fs_rx,
             job: job_rx,
+            lsp: lsp_rx,
         },
     )
 }

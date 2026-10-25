@@ -7,7 +7,15 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
+
+use saddle::agent::Agent;
+use saddle::events::{AgentEvent, FsEvent, TurnOutcome};
+use saddle::tools::{ProjectFs, Registry, lsp as lsp_tools};
+use saddle::watch::{ChangeKind, ChangeSet, Detail, FileChange};
+use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
 
 use saddle::config::LspServer;
 use saddle::lsp::{LspManager, ServerState, Severity, TextPosition};
@@ -112,13 +120,135 @@ async fn rust_analyzer_on_saddle() {
     let symbols = manager.workspace_symbols("resolve_root").await.unwrap();
     assert!(symbols.iter().any(|s| s.location.path == project));
 
+    let mut tools = Registry::default();
+    lsp_tools::install(&mut tools, manager.clone(), ProjectFs::new(&root).unwrap());
+    for (name, args) in [
+        (
+            "lsp_workspace_symbols",
+            serde_json::json!({"query": "resolve_root"}),
+        ),
+        (
+            "lsp_definition",
+            serde_json::json!({"path": "src/main.rs", "line": pos.line + 1, "col": pos.column + 1}),
+        ),
+        (
+            "lsp_references",
+            serde_json::json!({"path": "src/project.rs", "line": definition[0].range.start.line + 1, "col": definition[0].range.start.column + 1}),
+        ),
+    ] {
+        let result = tools.call(name, args).await;
+        assert!(!result.is_error, "{}", result.content);
+        eprintln!("{name}: {}", result.content);
+        assert!(result.content.contains("src/"));
+    }
+
+    // Opt-in live provider verification; credentials come from normal config.
+    let mut live_agent = if std::env::var_os("SADDLE_LIVE_LSP").is_some() {
+        let loaded = saddle::config::load().unwrap();
+        let provider =
+            saddle::provider::GenaiProvider::new(&loaded.config, &loaded.credentials, None)
+                .unwrap();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut agent = Agent::new(Arc::new(provider), tools, saddle::prompt::system(&root), tx);
+        let outcome = agent.submit("Use lsp_workspace_symbols to find resolve_root, then lsp_definition on its returned location, then lsp_references on the definition. Call those three tools in that order, and briefly tell me which files reference it. Do not edit anything.".into(), &CancellationToken::new()).await;
+        assert_eq!(outcome, TurnOutcome::Completed);
+        let mut names = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            match event {
+                AgentEvent::ToolCall { name, .. } => {
+                    eprintln!("live tool: {name}");
+                    names.push(name);
+                }
+                AgentEvent::ToolResult {
+                    is_error, output, ..
+                } => {
+                    assert!(!is_error, "{output}");
+                    eprintln!("live result: {output}");
+                }
+                AgentEvent::AssistantDelta(text) => eprint!("{text}"),
+                _ => {}
+            }
+        }
+        for name in ["lsp_workspace_symbols", "lsp_definition", "lsp_references"] {
+            assert!(names.iter().any(|n| n == name), "missing {name}: {names:?}");
+        }
+        Some((agent, rx))
+    } else {
+        None
+    };
+
+    let (changes_tx, changes_rx) = mpsc::unbounded_channel();
+    let (events_tx, mut events_rx) = mpsc::unbounded_channel();
+    let forward = tokio::spawn(saddle::lsp::changes::forward(
+        changes_rx,
+        events_tx,
+        manager.clone(),
+        Duration::from_secs(1),
+        Duration::from_secs(5),
+    ));
+
     // Introduce a type error on disk and report the change.
     let broken = root.join("src/prompt.rs");
     let mut text = std::fs::read_to_string(&broken).unwrap();
     text.push_str("\npub fn broken() -> u32 {\n    \"not a number\"\n}\n");
     std::fs::write(&broken, &text).unwrap();
     let started = Instant::now();
-    manager.did_change(vec![broken.clone()]);
+    changes_tx
+        .send(FsEvent::Changed(Arc::new(ChangeSet {
+            files: vec![FileChange {
+                path: broken.clone(),
+                display: "src/prompt.rs".into(),
+                kind: ChangeKind::Modified,
+                detail: Detail::Unseen {
+                    size: text.len() as u64,
+                },
+            }],
+            diagnostics: None,
+        })))
+        .unwrap();
+    assert_eq!(events_rx.recv().await.unwrap(), FsEvent::Settling);
+    let FsEvent::Changed(set) = tokio::time::timeout(Duration::from_secs(10), events_rx.recv())
+        .await
+        .unwrap()
+        .unwrap()
+    else {
+        panic!("expected change event")
+    };
+    let diagnostic_changes = set.diagnostics.as_deref().unwrap();
+    eprintln!(
+        "combined event after {:?}: {diagnostic_changes}",
+        started.elapsed()
+    );
+    assert!(
+        diagnostic_changes.contains("new: src/prompt.rs:"),
+        "{diagnostic_changes}"
+    );
+    assert!(
+        diagnostic_changes.contains("mismatched types"),
+        "{diagnostic_changes}"
+    );
+    if let Some((agent, rx)) = &mut live_agent {
+        let message = format!(
+            "{}\n{}\nBriefly explain the new diagnostic; do not edit anything.",
+            saddle::watch::message::describe(&set.files),
+            diagnostic_changes
+        );
+        assert_eq!(
+            agent.submit(message, &CancellationToken::new()).await,
+            TurnOutcome::Completed
+        );
+        let mut response = String::new();
+        while let Ok(event) = rx.try_recv() {
+            if let AgentEvent::AssistantDelta(text) = event {
+                response.push_str(&text);
+            }
+        }
+        eprintln!("live reaction: {response}");
+        assert!(
+            response.contains("u32") && (response.contains("str") || response.contains("string")),
+            "{response}"
+        );
+    }
     let errors = loop {
         manager
             .settle(Duration::from_secs(1), Duration::from_secs(300))
@@ -170,6 +300,8 @@ async fn rust_analyzer_on_saddle() {
         eprintln!("  {line}");
     }
     let started = Instant::now();
+    drop(changes_tx);
+    forward.await.unwrap();
     manager.shutdown().await;
     eprintln!("shutdown after {:?}", started.elapsed());
     assert_eq!(manager.statuses()[0].state, ServerState::Stopped);

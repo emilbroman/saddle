@@ -7,8 +7,8 @@ change and why, watches your edits as you save them, and uses language servers
 to keep an accurate picture of the code.
 
 Status: early. The agent converses, streams its answers, reads the project
-through read-only file tools, runs shell commands in an OS-enforced read-only
-sandbox and is told when you save changes. LSP is still being built.
+through read-only file and LSP tools, runs shell commands in an OS-enforced
+read-only sandbox and receives diffs and diagnostics when you save changes.
 
 ## Building and running
 
@@ -45,15 +45,26 @@ transcript, marked `[interrupted]`, and the agent sees what it had said so far.
 Saddle watches the project and tells the agent when you save. Changes are
 batched: a batch is delivered once nothing has changed for `quiet_ms` (1 s by
 default), or after `max_window_ms` (30 s) even if you keep saving. A batch that
-arrives while the agent is working interrupts it, like Esc, and starts a new
-turn; otherwise it starts one. The transcript shows a one-line `✎ N files
-changed` entry (Ctrl+O lists the files).
+arrives while the agent is working interrupts it immediately, like Esc.
+Saddle then syncs the changed files to the language servers and waits for
+diagnostics to settle before starting a turn with one combined event. The
+transcript shows a one-line `✎ N files changed` entry (Ctrl+O expands it).
 
 The agent receives the changed, created and deleted paths, and a unified diff
 for each text file whose previous content it has seen: files it read with
 `read_file`, and files that changed earlier in the session. Other files are
 reported with their size; binary files and files over 1 MiB by path only.
 Saving a file without changing it is not reported.
+
+The same event includes new, changed and resolved diagnostics, compared with
+the snapshot before syncing the batch. The extra wait defaults to 1 s of
+quiet, capped at 5 s (`diagnostics_quiet_ms` / `diagnostics_max_wait_ms`).
+Settling considers document sync and server progress across the workspace,
+not just diagnostic notifications; a cold rust-analyzer may still be working
+at the cap. In that case the event marks diagnostics as pending, and the
+agent can query late results with `lsp_diagnostics`. With no language servers
+configured, there is no extra wait. These timings do not change the watcher
+batching defaults above.
 
 Ignored files are never reported: `.git`, anything matched by `.gitignore`,
 `.ignore`, `.git/info/exclude` or the global git excludes file, and the
@@ -103,7 +114,9 @@ writable = ["target"]                    # relative to that root, no `..`
 
 [batching]                               # grouping of file-change notifications
 quiet_ms = 1000                          # deliver after this long without changes (default 1000)
-max_window_ms = 30000                    # never hold a batch longer than this (default 30000)
+max_window_ms = 30000                    # never hold a file batch longer than this (default 30000)
+diagnostics_quiet_ms = 1000              # LSP quiet period after syncing a batch (default 1000)
+diagnostics_max_wait_ms = 5000           # cap on the extra diagnostics wait (default 5000)
 
 [search]                                 # web search via Exa
 enabled = true                           # default true; needs an Exa key
@@ -180,6 +193,28 @@ turns it off silently. Each search costs Exa credits. Results are framed to the
 model as untrusted source material, not instructions. Requests time out after
 30 s; key, credit, rate-limit and network errors appear as the tool's result in
 the transcript. The agent cannot fetch whole pages.
+
+### LSP
+
+| Tool | What it does |
+| ---- | ------------ |
+| `lsp_workspace_symbols(query)` | Searches symbols by name across workspace servers; the entry point from a name to a location. |
+| `lsp_document_symbols(path)` | Lists a file's symbol outline. |
+| `lsp_definition(path, line, col)` | Finds definitions at a location. |
+| `lsp_references(path, line, col, include_declaration?)` | Finds references; includes the declaration by default. |
+| `lsp_hover(path, line, col)` | Gets type information or documentation. |
+| `lsp_diagnostics(path?)` | Shows current diagnostics with severity, for one file or the workspace. |
+
+Paths are project-relative. Lines and columns are 1-based; columns count
+Unicode scalar values, not bytes or UTF-16 units. Saddle converts positions
+to and from the server's negotiated encoding. File queries open and sync the
+document from disk first; missing server configuration or a server that is
+not ready produces a tool error.
+
+Results are compact and bounded, with `path:line:col` locations and symbol
+names, signatures or diagnostic text where available. Locations outside the
+project are labeled as external; Saddle does not read those files. Workspace
+diagnostics show what active servers have published, not a full-project check.
 
 ### Shell
 
@@ -281,7 +316,7 @@ A single crate with a library (`src/lib.rs`) and a thin binary (`src/main.rs`):
 - `provider` — streaming inference behind a `Provider` trait: `genai` against
   the configured endpoint, and a scripted provider for tests.
 - `tools` — the `Tool` trait and registry, root confinement, the read-only
-  file tools, the shell tools and Exa web search.
+  file tools, LSP queries, the shell tools and Exa web search.
 - `sandbox` — the sandbox policy, curated environment and backends (Bubblewrap
   arguments, the Landlock launcher, the Seatbelt profile), with probing.
 - `jobs` — shell jobs: spawning under the sandbox, output capture, waiting and
@@ -292,9 +327,9 @@ A single crate with a library (`src/lib.rs`) and a thin binary (`src/main.rs`):
   `Watcher::subscribe` receivers.
 - `lsp` — the generic language-server client: one supervised process per
   language and workspace root (`async-lsp` over stdio), document sync from
-  disk, a diagnostics store with a settle signal, and definition, references,
-  hover and symbol queries in Unicode-character positions, converted to the
-  server's negotiated encoding.
+  disk, diagnostics settling and diffs for change events, and definition,
+  references, hover and symbol queries in Unicode-scalar positions, converted
+  to the server's negotiated encoding.
 - `prompt` — the system prompt.
 - `app` — application state and the central `tokio::select!` event loop over
   terminal input and those channels.
@@ -322,3 +357,9 @@ crate is ignored by default:
 ```sh
 cargo test --test lsp_rust_analyzer -- --ignored --nocapture
 ```
+
+The rust-analyzer test also checks the registered tools and a combined diagnostic
+change event using the default settling timings. Set `SADDLE_LIVE_LSP=1` to opt
+into a live inference turn (using normal config and credentials): it asks the
+model to run symbols → definition → references and then explain an introduced
+type error. This makes inference requests to the configured endpoint.

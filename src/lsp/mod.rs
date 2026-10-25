@@ -6,6 +6,7 @@
 //! Positions in this API are zero-based, with columns counted in Unicode
 //! scalar values; conversion to the server's negotiated encoding happens here.
 
+pub mod changes;
 mod diagnostics;
 mod encoding;
 mod language;
@@ -399,6 +400,9 @@ impl LspManager {
         loop {
             activity.borrow_and_update();
             let now = tokio::time::Instant::now();
+            if now >= deadline {
+                return false;
+            }
             let busy = self.inner.shared.busy();
             let settled_at = now + quiet;
             let until = if busy {
@@ -435,6 +439,15 @@ impl LspManager {
             .iter()
             .find_map(|s| s.document_text(path))
             .or_else(|| read_text(path).ok())
+    }
+
+    /// Opens or refreshes a document from disk before reading diagnostics.
+    pub async fn sync_document(&self, path: &Path) -> Result<(), LspError> {
+        let path = self.resolve(path)?;
+        let server = self.server_for(&path)?;
+        server.ensure_open(&path)?;
+        server.ready().await?;
+        Ok(())
     }
 
     /// Opens the document and converts `pos` to the server's encoding.
@@ -856,6 +869,76 @@ mod tests {
             root: "/p".into(),
             state,
         }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn settle_resets_quiet_on_publication_and_sync() {
+        let manager = LspManager::new(PathBuf::from("/p"), &BTreeMap::new(), None);
+        let task = tokio::spawn({
+            let manager = manager.clone();
+            async move {
+                manager
+                    .settle(Duration::from_secs(1), Duration::from_secs(5))
+                    .await
+            }
+        });
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_millis(900)).await;
+        manager.inner.shared.bump();
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_millis(900)).await;
+        assert!(!task.is_finished());
+        tokio::time::advance(Duration::from_millis(100)).await;
+        assert!(task.await.unwrap());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn settle_caps_busy_and_continuous_activity() {
+        let manager = LspManager::new(PathBuf::from("/p"), &BTreeMap::new(), None);
+        for busy in [false, true] {
+            manager
+                .inner
+                .shared
+                .pending
+                .store(usize::from(busy), Ordering::SeqCst);
+            let task = tokio::spawn({
+                let manager = manager.clone();
+                async move {
+                    manager
+                        .settle(Duration::from_secs(1), Duration::from_secs(5))
+                        .await
+                }
+            });
+            tokio::task::yield_now().await;
+            for _ in 0..10 {
+                tokio::time::advance(Duration::from_millis(500)).await;
+                manager.inner.shared.bump();
+                tokio::task::yield_now().await;
+            }
+            assert!(!task.await.unwrap());
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn settle_waits_for_pending_sync_to_finish() {
+        let manager = LspManager::new(PathBuf::from("/p"), &BTreeMap::new(), None);
+        manager.inner.shared.pending.store(1, Ordering::SeqCst);
+        let task = tokio::spawn({
+            let manager = manager.clone();
+            async move {
+                manager
+                    .settle(Duration::from_secs(1), Duration::from_secs(5))
+                    .await
+            }
+        });
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_secs(2)).await;
+        assert!(!task.is_finished());
+        manager.inner.shared.pending.store(0, Ordering::SeqCst);
+        manager.inner.shared.bump();
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_secs(1)).await;
+        assert!(task.await.unwrap());
     }
 
     #[test]

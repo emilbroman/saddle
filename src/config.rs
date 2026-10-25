@@ -174,6 +174,10 @@ pub struct BatchingConfig {
     pub quiet_ms: u64,
     /// Upper bound on how long a batch may keep growing.
     pub max_window_ms: u64,
+    /// Extra quiet period for language-server diagnostics after syncing a batch.
+    pub diagnostics_quiet_ms: u64,
+    /// Maximum extra wait, even if the server is still busy.
+    pub diagnostics_max_wait_ms: u64,
 }
 
 impl Default for BatchingConfig {
@@ -181,6 +185,8 @@ impl Default for BatchingConfig {
         Self {
             quiet_ms: 1_000,
             max_window_ms: 30_000,
+            diagnostics_quiet_ms: 1_000,
+            diagnostics_max_wait_ms: 5_000,
         }
     }
 }
@@ -481,6 +487,8 @@ writable = ["target", "build"]
 [batching]
 quiet_ms = 500
 max_window_ms = 10000
+diagnostics_quiet_ms = 250
+diagnostics_max_wait_ms = 2000
 
 [search]
 enabled = false
@@ -510,6 +518,8 @@ num_results = 8
         );
         assert_eq!(config.batching.quiet_ms, 500);
         assert_eq!(config.batching.max_window_ms, 10_000);
+        assert_eq!(config.batching.diagnostics_quiet_ms, 250);
+        assert_eq!(config.batching.diagnostics_max_wait_ms, 2_000);
         assert!(!config.search.enabled);
         assert_eq!(config.search.num_results, 8);
     }

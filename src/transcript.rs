@@ -12,6 +12,7 @@ use ratatui::text::{Line, Span};
 const GUTTER: usize = 2;
 const TOOL_CALL_MAX_LINES: usize = 3;
 const TOOL_RESULT_MAX_LINES: usize = 6;
+const SHELL_OUTPUT_TAIL_LINES: usize = 20;
 const CHANGES_MAX_LINES: usize = 2;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -63,13 +64,14 @@ pub enum Entry {
 #[derive(Debug)]
 struct Item {
     entry: Entry,
+    shell_result: bool,
     layout: Option<(usize, Vec<Line<'static>>)>,
 }
 
 #[derive(Debug, Default)]
 pub struct Transcript {
     items: Vec<Item>,
-    /// Show tool calls and results in full instead of collapsed.
+    /// Show full details instead of previews (including shell output tails).
     expanded: bool,
     session: Option<Session>,
     persistence_error: Option<String>,
@@ -107,8 +109,24 @@ impl Transcript {
 
     pub fn push(&mut self, entry: Entry) {
         self.persist(UiEvent::Push(entry.clone()));
+        let shell_result = match &entry {
+            Entry::ToolResult { call_id, .. } => self
+                .items
+                .iter()
+                .rev()
+                .find_map(|item| match &item.entry {
+                    Entry::ToolCall { id, name, .. } if id == call_id => Some(matches!(
+                        name.as_str(),
+                        "shell_start" | "shell_wait" | "shell_output"
+                    )),
+                    _ => None,
+                })
+                .unwrap_or(false),
+            _ => false,
+        };
         self.items.push(Item {
             entry,
+            shell_result,
             layout: None,
         });
     }
@@ -144,6 +162,7 @@ impl Transcript {
                     state: StreamState::Streaming,
                 },
             layout,
+            ..
         }) = self.items.last_mut()
         {
             text.push_str(delta);
@@ -154,6 +173,7 @@ impl Transcript {
                     text: delta.to_owned(),
                     state: StreamState::Streaming,
                 },
+                shell_result: false,
                 layout: None,
             });
         }
@@ -173,6 +193,7 @@ impl Transcript {
         if let Some(Item {
             entry: Entry::Assistant { state, .. },
             layout,
+            ..
         }) = self.items.last_mut()
             && *state == StreamState::Streaming
         {
@@ -218,7 +239,10 @@ impl Transcript {
 impl Item {
     fn lines(&mut self, width: usize, expanded: bool) -> &[Line<'static>] {
         if self.layout.as_ref().is_none_or(|(w, _)| *w != width) {
-            self.layout = Some((width, layout_entry(&self.entry, width, expanded)));
+            self.layout = Some((
+                width,
+                layout_entry(&self.entry, width, expanded, self.shell_result),
+            ));
         }
         &self.layout.as_ref().unwrap().1
     }
@@ -226,7 +250,12 @@ impl Item {
 
 /// Every entry is preceded by a blank separator line and rendered with a
 /// two-column gutter whose first row carries the entry's marker.
-fn layout_entry(entry: &Entry, width: usize, expanded: bool) -> Vec<Line<'static>> {
+fn layout_entry(
+    entry: &Entry,
+    width: usize,
+    expanded: bool,
+    shell_result: bool,
+) -> Vec<Line<'static>> {
     let body_width = width.saturating_sub(GUTTER).max(1);
     let dim = Style::new().add_modifier(Modifier::DIM);
 
@@ -274,8 +303,12 @@ fn layout_entry(entry: &Entry, width: usize, expanded: bool) -> Vec<Line<'static
                 "↳",
                 style,
                 style,
-                wrap(output, body_width),
-                Some(TOOL_RESULT_MAX_LINES),
+                if shell_result && !expanded {
+                    shell_preview(output, body_width)
+                } else {
+                    wrap(output, body_width)
+                },
+                (!shell_result).then_some(TOOL_RESULT_MAX_LINES),
             )
         }
         Entry::Notice { text, level } => {
@@ -323,6 +356,46 @@ fn layout_entry(entry: &Entry, width: usize, expanded: bool) -> Vec<Line<'static
         lines.push(Line::from(vec![gutter, Span::styled(row, body_style)]));
     }
     lines
+}
+
+fn shell_preview(output: &str, width: usize) -> Vec<String> {
+    let lines: Vec<_> = output.split('\n').collect();
+    // Job reports have an optional wait note, a status, output and a log path.
+    let header_len = lines
+        .iter()
+        .take(2)
+        .position(|line| line.starts_with("job "))
+        .map_or(0, |index| index + 1);
+    let footer_start = if lines
+        .last()
+        .is_some_and(|line| line.starts_with("[full log: "))
+    {
+        lines.len() - 1
+    } else {
+        lines.len()
+    };
+    let mut rows = Vec::new();
+    for line in &lines[..header_len] {
+        rows.extend(wrap(line, width));
+    }
+    let mut tail = if header_len < footer_start {
+        wrap(&lines[header_len..footer_start].join("\n"), width)
+    } else {
+        Vec::new()
+    };
+    if tail.len() > SHELL_OUTPUT_TAIL_LINES {
+        let hidden = tail.len() - SHELL_OUTPUT_TAIL_LINES;
+        rows.extend(wrap(
+            &format!("… {hidden} earlier lines (Ctrl+O to expand)"),
+            width,
+        ));
+        tail.drain(..hidden);
+    }
+    rows.extend(tail);
+    for line in &lines[footer_start..] {
+        rows.extend(wrap(line, width));
+    }
+    rows
 }
 
 /// Wraps `text` to `width` display columns, keeping explicit newlines, blank
@@ -521,6 +594,146 @@ mod tests {
         assert_eq!(t.line_count(40), 11);
         t.toggle_expanded();
         assert_eq!(t.line_count(40), total);
+    }
+
+    fn shell_report(status: &str) -> String {
+        let output = (1..=30)
+            .map(|i| format!("output {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        format!("job 7 {status} after 2s\n{output}\n[full log: /tmp/7.log]")
+    }
+
+    fn push_tool(t: &mut Transcript, id: &str, name: &str, output: String) {
+        t.push(Entry::ToolCall {
+            id: id.into(),
+            name: name.into(),
+            summary: "command".into(),
+        });
+        t.push(Entry::ToolResult {
+            call_id: id.into(),
+            output,
+            is_error: false,
+        });
+    }
+
+    #[test]
+    fn shell_results_show_status_and_twenty_line_tail_by_default() {
+        for name in ["shell_start", "shell_wait", "shell_output"] {
+            let mut t = Transcript::default();
+            push_tool(&mut t, "1", name, shell_report("exited with status 1"));
+            let total = t.line_count(100);
+            let lines = text(&t.lines(100, 0..total));
+            assert_eq!(lines[3], "↳ job 7 exited with status 1 after 2s");
+            assert_eq!(lines[4], "  … 10 earlier lines (Ctrl+O to expand)");
+            assert_eq!(lines[5], "  output 11");
+            assert_eq!(lines[24], "  output 30");
+            assert_eq!(lines[25], "  [full log: /tmp/7.log]");
+
+            t.toggle_expanded();
+            let expanded_total = t.line_count(100);
+            let expanded = text(&t.lines(100, 0..expanded_total));
+            assert!(expanded.contains(&"  output 1".to_owned()));
+            assert_eq!(expanded_total, total + 9);
+            t.toggle_expanded();
+            assert_eq!(t.line_count(100), total);
+            assert_eq!(text(&t.lines(100, 0..total)), lines);
+        }
+    }
+
+    #[test]
+    fn shell_preview_keeps_wait_note_status_and_no_output() {
+        let output = "Wait interrupted; the job keeps running.\njob 7 running after 2s (still running; shell_wait or shell_output with job_id 7)\n(no new output)\n[full log: /tmp/7.log]";
+        assert_eq!(
+            shell_preview(output, 100),
+            output.split('\n').collect::<Vec<_>>()
+        );
+        let output = format!(
+            "Waited 60 s; the job keeps running.\n{}",
+            shell_report("running")
+        );
+        let rows = shell_preview(&output, 100);
+        assert_eq!(rows[0], "Waited 60 s; the job keeps running.");
+        assert_eq!(rows[1], "job 7 running after 2s");
+        assert_eq!(rows[3], "output 11");
+    }
+
+    #[test]
+    fn shell_results_are_matched_by_call_id_and_restored_without_schema_changes() {
+        let events = vec![
+            UiEvent::Push(Entry::ToolCall {
+                id: "shell".into(),
+                name: "shell_start".into(),
+                summary: "command".into(),
+            }),
+            UiEvent::Push(Entry::ToolCall {
+                id: "read".into(),
+                name: "read_file".into(),
+                summary: "file".into(),
+            }),
+            UiEvent::Push(Entry::ToolResult {
+                call_id: "shell".into(),
+                output: shell_report("running"),
+                is_error: false,
+            }),
+        ];
+        let mut t = Transcript::restore(events);
+        let total = t.line_count(100);
+        let lines = text(&t.lines(100, 0..total));
+        assert!(lines.contains(&"  output 30".to_owned()));
+        assert!(!lines.contains(&"  output 1".to_owned()));
+        assert_eq!(t.entries().count(), 3);
+    }
+
+    #[test]
+    fn unrelated_and_unmatched_results_keep_collapsed_default() {
+        for name in ["shell_list", "shell_kill", "read_file"] {
+            let mut t = Transcript::default();
+            push_tool(&mut t, "1", name, shell_report("running"));
+            assert_eq!(t.line_count(100), 3 + TOOL_RESULT_MAX_LINES);
+        }
+        let mut t = Transcript::default();
+        t.push(Entry::ToolResult {
+            call_id: "missing".into(),
+            output: shell_report("running"),
+            is_error: false,
+        });
+        assert_eq!(t.line_count(100), 1 + TOOL_RESULT_MAX_LINES);
+    }
+
+    #[test]
+    fn shell_preview_rewraps_the_tail_on_resize_and_preserves_error_style() {
+        let mut t = Transcript::default();
+        t.push(Entry::ToolCall {
+            id: "1".into(),
+            name: "shell_start".into(),
+            summary: "command".into(),
+        });
+        t.push(Entry::ToolResult {
+            call_id: "1".into(),
+            output: "failed to start".into(),
+            is_error: true,
+        });
+        let wide = t.line_count(100);
+        assert_eq!(wide, 4);
+        let lines = t.lines(100, 0..wide);
+        assert_eq!(text(&lines)[3], "↳ failed to start");
+        assert_eq!(lines[3].spans[1].style.fg, Some(Color::Red));
+        assert!(t.line_count(8) > wide);
+        assert_eq!(t.line_count(100), wide);
+
+        let output = format!(
+            "job 7 running after 2s\n{}\n[full log: /tmp/7.log]",
+            "x".repeat(300)
+        );
+        let rows = shell_preview(&output, 10);
+        assert_eq!(
+            rows.iter()
+                .filter(|row| row.as_str() == "xxxxxxxxxx")
+                .count(),
+            20
+        );
+        assert!(!rows.iter().any(|row| row.contains("more lines")));
     }
 
     #[test]

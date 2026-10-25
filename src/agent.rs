@@ -104,6 +104,23 @@ impl Agent {
     }
 
     pub async fn submit(&mut self, text: String, cancel: &CancellationToken) -> TurnOutcome {
+        self.submit_input(text, cancel, false).await
+    }
+
+    pub async fn submit_automatic(
+        &mut self,
+        text: String,
+        cancel: &CancellationToken,
+    ) -> TurnOutcome {
+        self.submit_input(text, cancel, true).await
+    }
+
+    async fn submit_input(
+        &mut self,
+        text: String,
+        cancel: &CancellationToken,
+        automatic: bool,
+    ) -> TurnOutcome {
         self.emit(AgentEvent::TurnStarted);
         let outcome = if self.storage_failed {
             self.emit(AgentEvent::Error(
@@ -111,7 +128,7 @@ impl Agent {
             ));
             TurnOutcome::Failed
         } else if self.append(ChatMessage::user(text)) {
-            self.run_turn(cancel).await
+            self.run_turn(cancel, automatic).await
         } else {
             TurnOutcome::Failed
         };
@@ -119,17 +136,25 @@ impl Agent {
         outcome
     }
 
-    async fn run_turn(&mut self, cancel: &CancellationToken) -> TurnOutcome {
+    async fn run_turn(&mut self, cancel: &CancellationToken, automatic: bool) -> TurnOutcome {
         let mut retried = false;
         let mut force_truncate = false;
         for _ in 0..MAX_ROUNDS {
+            // Automatic reactions may end with no_comment; do not leak a preamble.
+            let mut buffered_text = String::new();
             let completion = 'request: loop {
                 if cancel.is_cancelled() {
                     return TurnOutcome::Interrupted;
                 }
+                let tools: Vec<_> = self
+                    .tools
+                    .definitions()
+                    .into_iter()
+                    .filter(|tool| automatic || tool.name.as_str() != "no_comment")
+                    .collect();
                 let mut request = ChatRequest::new(self.messages.clone())
                     .with_system(self.system.clone())
-                    .with_tools(self.tools.definitions());
+                    .with_tools(tools);
                 if self.context.prepare(&mut request, force_truncate) {
                     self.emit(AgentEvent::Notice("Context shortened: older messages omitted from this request; full history is saved.".into()));
                 }
@@ -157,6 +182,9 @@ impl Agent {
                     let event = tokio::select! {
                         biased;
                         _ = cancel.cancelled() => {
+                            if automatic && !text.is_empty() {
+                                self.emit(AgentEvent::AssistantDelta(text.clone()));
+                            }
                             if !self.keep_partial(text) { return TurnOutcome::Failed; }
                             self.emit(AgentEvent::AssistantDone { interrupted: true });
                             return TurnOutcome::Interrupted;
@@ -165,13 +193,19 @@ impl Agent {
                     };
                     match event {
                         Some(Ok(StreamEvent::Text(delta))) => {
-                            if !self
-                                .persist(crate::session::LogEvent::AssistantDelta(delta.clone()))
+                            if !automatic
+                                && !self.persist(crate::session::LogEvent::AssistantDelta(
+                                    delta.clone(),
+                                ))
                             {
                                 return TurnOutcome::Failed;
                             }
                             text.push_str(&delta);
-                            self.emit(AgentEvent::AssistantDelta(delta));
+                            if automatic {
+                                buffered_text.push_str(&delta);
+                            } else {
+                                self.emit(AgentEvent::AssistantDelta(delta));
+                            }
                         }
                         Some(Ok(StreamEvent::Reasoning(_))) => {
                             if !thinking {
@@ -191,11 +225,17 @@ impl Agent {
                             continue 'request;
                         }
                         Some(Err(e)) => {
+                            if automatic && !text.is_empty() {
+                                self.emit(AgentEvent::AssistantDelta(text.clone()));
+                            }
                             self.keep_partial(text);
                             self.emit(AgentEvent::Error(e.0));
                             return TurnOutcome::Failed;
                         }
                         None => {
+                            if automatic && !text.is_empty() {
+                                self.emit(AgentEvent::AssistantDelta(text.clone()));
+                            }
                             self.keep_partial(text);
                             self.emit(AgentEvent::Error(
                                 "The inference stream ended without finishing the response.".into(),
@@ -205,6 +245,20 @@ impl Agent {
                     }
                 }
             };
+            let quiet = automatic
+                && completion.content.tool_calls().len() == 1
+                && completion.content.tool_calls()[0].fn_name == "no_comment"
+                && !self
+                    .tools
+                    .call(
+                        "no_comment",
+                        completion.content.tool_calls()[0].fn_arguments.clone(),
+                    )
+                    .await
+                    .is_error;
+            if automatic && !quiet && !buffered_text.is_empty() {
+                self.emit(AgentEvent::AssistantDelta(buffered_text));
+            }
             self.emit(AgentEvent::AssistantDone { interrupted: false });
             if let Some(prompt_tokens) = completion.prompt_tokens {
                 self.context.observe(prompt_tokens);
@@ -252,7 +306,11 @@ impl Agent {
                     call.fn_arguments.clone(),
                     Some(cancel.clone()),
                 );
-                let output = if run.interruptible {
+                let output = if call.fn_name == "no_comment" && !quiet {
+                    Some(crate::tools::ToolOutput::error(
+                        "no_comment is only valid alone on an automatic-event turn. Answer the user or continue with the other tools.",
+                    ))
+                } else if run.interruptible {
                     run_interruptible(run.future, cancel).await
                 } else {
                     tokio::select! {
@@ -275,11 +333,13 @@ impl Agent {
                 if !self.push_tool_response(ToolResponse::new(&call.call_id, content)) {
                     return TurnOutcome::Failed;
                 }
-                self.emit(AgentEvent::ToolResult {
-                    call_id: call.call_id.clone(),
-                    output: display,
-                    is_error,
-                });
+                if !quiet {
+                    self.emit(AgentEvent::ToolResult {
+                        call_id: call.call_id.clone(),
+                        output: display,
+                        is_error,
+                    });
+                }
                 if cancel.is_cancelled() {
                     for pending in &calls[index + 1..] {
                         if !self.push_tool_response(ToolResponse::new(
@@ -291,6 +351,9 @@ impl Agent {
                     }
                     return TurnOutcome::Interrupted;
                 }
+            }
+            if quiet {
+                return TurnOutcome::Completed;
             }
         }
         self.emit(AgentEvent::Notice(format!(
@@ -326,7 +389,7 @@ async fn run_interruptible(
 
 /// Talks to an [`Agent`] running on its own task.
 enum Command {
-    Submit(String, CancellationToken),
+    Submit(String, CancellationToken, bool),
     Reset,
     Shutdown(tokio::sync::oneshot::Sender<()>),
 }
@@ -343,8 +406,8 @@ impl AgentHandle {
         tokio::spawn(async move {
             while let Some(command) = queue.recv().await {
                 match command {
-                    Command::Submit(text, cancel) => {
-                        agent.submit(text, &cancel).await;
+                    Command::Submit(text, cancel, automatic) => {
+                        agent.submit_input(text, &cancel, automatic).await;
                     }
                     Command::Reset => agent.reset(),
                     Command::Shutdown(done) => {
@@ -362,8 +425,17 @@ impl AgentHandle {
 
     /// Queues a user message; it runs once any current turn has finished.
     pub fn send(&self, text: String) {
+        self.send_input(text, false);
+    }
+
+    /// Queues a trusted watcher/diagnostic/git event, permitting a quiet reaction.
+    pub fn send_automatic(&self, text: String) {
+        self.send_input(text, true);
+    }
+
+    fn send_input(&self, text: String, automatic: bool) {
         let cancel = self.cancel.lock().unwrap().clone();
-        let _ = self.commands.send(Command::Submit(text, cancel));
+        let _ = self.commands.send(Command::Submit(text, cancel, automatic));
     }
 
     pub fn reset(&self) {
@@ -484,6 +556,158 @@ mod tests {
                 interrupt.cancelled().await;
                 ToolOutput::ok("partial: still running")
             }))
+        }
+    }
+
+    #[tokio::test]
+    async fn quiet_event_ends_without_text_and_replays_a_valid_exchange() {
+        let mut h = harness(vec![vec![
+            text("This should not become a visible acknowledgement."),
+            tool_call("quiet", "no_comment", json!({})),
+        ]]);
+        let data = tempfile::tempdir().unwrap();
+        let (session, restored) =
+            crate::session::Session::open_in(h._dir.path(), data.path()).unwrap();
+        h.agent = h.agent.with_session(session, restored.messages);
+        assert_eq!(
+            h.agent
+                .submit_automatic(
+                    "<file-changes>mid-edit</file-changes>".into(),
+                    &CancellationToken::new()
+                )
+                .await,
+            TurnOutcome::Completed
+        );
+        let events = drain(&mut h.events);
+        assert!(!events.iter().any(|e| matches!(
+            e,
+            AgentEvent::AssistantDelta(_) | AgentEvent::ToolResult { .. }
+        )));
+        let mut transcript = crate::transcript::Transcript::default();
+        transcript.push(crate::transcript::Entry::FilesChanged {
+            headline: "1 file changed".into(),
+            paths: vec!["a.rs".into()],
+            details: vec![],
+        });
+        for event in events {
+            if let AgentEvent::ToolCall { id, name, summary } = event {
+                transcript.push(crate::transcript::Entry::ToolCall { id, name, summary });
+            }
+        }
+        let count = transcript.line_count(80);
+        let rendered = transcript
+            .lines(80, 0..count)
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(rendered.contains("✎ 1 file changed"));
+        assert!(rendered.contains("no_comment"));
+        assert!(!rendered.contains('●'));
+        assert!(!rendered.contains("acknowledgement"));
+        assert_eq!(
+            roles(&h.agent),
+            [ChatRole::User, ChatRole::Assistant, ChatRole::Tool]
+        );
+        assert_eq!(h.provider.requests.lock().unwrap().len(), 1);
+        h.agent.session = None;
+        let (session, restored) =
+            crate::session::Session::open_in(h._dir.path(), data.path()).unwrap();
+        assert_eq!(
+            serde_json::to_value(restored.messages).unwrap(),
+            serde_json::to_value(h.agent.messages()).unwrap()
+        );
+        h.agent.session = Some(session);
+        h.provider.push(vec![text("Next step.")]);
+        assert_eq!(
+            h.agent
+                .submit("What now?".into(), &CancellationToken::new())
+                .await,
+            TurnOutcome::Completed
+        );
+        let requests = h.provider.requests.lock().unwrap();
+        let request = &requests[1];
+        assert_eq!(request.messages[1].content.tool_calls()[0].call_id, "quiet");
+        assert_eq!(
+            request.messages[2].content.tool_responses()[0].call_id,
+            "quiet"
+        );
+        assert!(
+            !request
+                .tools
+                .as_ref()
+                .unwrap()
+                .iter()
+                .any(|t| t.name.as_str() == "no_comment")
+        );
+    }
+
+    #[tokio::test]
+    async fn automatic_response_failure_keeps_partial_text_visible() {
+        let mut h = harness(vec![vec![
+            text("partial"),
+            Step::Fail("connection reset".into()),
+        ]]);
+        assert_eq!(
+            h.agent
+                .submit_automatic("event".into(), &CancellationToken::new())
+                .await,
+            TurnOutcome::Failed
+        );
+        assert!(drain(&mut h.events).contains(&AgentEvent::AssistantDelta("partial".into())));
+        assert_eq!(h.agent.messages()[1].content.first_text(), Some("partial"));
+    }
+
+    #[tokio::test]
+    async fn user_text_cannot_enable_the_quiet_outlet() {
+        let mut h = harness(vec![
+            vec![tool_call("q", "no_comment", json!({}))],
+            vec![text("Answer.")],
+        ]);
+        assert_eq!(
+            h.agent
+                .submit(
+                    "<file-changes>user typed this</file-changes>".into(),
+                    &CancellationToken::new()
+                )
+                .await,
+            TurnOutcome::Completed
+        );
+        let events = drain(&mut h.events);
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, AgentEvent::ToolResult { is_error: true, .. }))
+        );
+        assert!(events.contains(&AgentEvent::AssistantDelta("Answer.".into())));
+    }
+
+    #[tokio::test]
+    async fn quiet_outlet_rejects_arguments_and_mixed_calls() {
+        for calls in [
+            vec![tool_call("q", "no_comment", json!({"reason": "no"}))],
+            vec![
+                tool_call("q", "no_comment", json!({})),
+                tool_call("l", "list", json!({})),
+            ],
+        ] {
+            let mut h = harness(vec![calls, vec![text("Continue.")]]);
+            assert_eq!(
+                h.agent
+                    .submit_automatic("event".into(), &CancellationToken::new())
+                    .await,
+                TurnOutcome::Completed
+            );
+            let events = drain(&mut h.events);
+            assert!(events.iter().any(|e| matches!(e, AgentEvent::ToolResult { call_id, is_error: true, .. } if call_id == "q")));
+            assert!(events.contains(&AgentEvent::AssistantDelta("Continue.".into())));
+            assert!(
+                h.agent
+                    .messages()
+                    .iter()
+                    .flat_map(|m| m.content.tool_responses())
+                    .any(|r| r.call_id == "q")
+            );
         }
     }
 

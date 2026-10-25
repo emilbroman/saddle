@@ -6,9 +6,9 @@ to your codebase. Every change is made by you. The agent explains what should
 change and why, watches your edits as you save them, and uses language servers
 to keep an accurate picture of the code.
 
-Status: early. The agent converses, streams its answers and reads the project
-through read-only file tools. File watching, LSP and the sandboxed shell are
-still being built.
+Status: early. The agent converses, streams its answers, reads the project
+through read-only file tools and is told when you save changes. LSP and the
+sandboxed shell are still being built.
 
 ## Building and running
 
@@ -39,6 +39,27 @@ worktree containing it. It is shown in the status line.
 While the agent is working, Enter keeps your draft in the input instead of
 sending it; press Esc to interrupt. An interrupted answer stays in the
 transcript, marked `[interrupted]`, and the agent sees what it had said so far.
+
+### Saved changes
+
+Saddle watches the project and tells the agent when you save. Changes are
+batched: a batch is delivered once nothing has changed for `quiet_ms` (1 s by
+default), or after `max_window_ms` (30 s) even if you keep saving. A batch that
+arrives while the agent is working interrupts it, like Esc, and starts a new
+turn; otherwise it starts one. The transcript shows a one-line `✎ N files
+changed` entry (Ctrl+O lists the files).
+
+The agent receives the changed, created and deleted paths, and a unified diff
+for each text file whose previous content it has seen: files it read with
+`read_file`, and files that changed earlier in the session. Other files are
+reported with their size; binary files and files over 1 MiB by path only.
+Saving a file without changing it is not reported.
+
+Ignored files are never reported: `.git`, anything matched by `.gitignore`,
+`.ignore`, `.git/info/exclude` or the global git excludes file, and the
+sandbox's writable carve-outs (such as `target/`). On Linux each reportable
+directory gets its own inotify watch, so ignored trees cost none; on macOS one
+FSEvents stream covers the project.
 
 Shift+Enter needs a terminal that supports the kitty keyboard protocol (kitty,
 WezTerm, Ghostty, recent iTerm2); elsewhere use Alt+Enter or Ctrl+J. Other keys
@@ -143,6 +164,10 @@ A single crate with a library (`src/lib.rs`) and a thin binary (`src/main.rs`):
   the configured endpoint, and a scripted provider for tests.
 - `tools` — the `Tool` trait and registry, root confinement, and the read-only
   file tools.
+- `watch` — the file watcher (`notify` with its full debouncer), ignore
+  filtering, the batching policy, the record of what Saddle last saw of each
+  file, and the change event sent to the agent. Change sets also go to
+  `Watcher::subscribe` receivers.
 - `prompt` — the system prompt.
 - `app` — application state and the central `tokio::select!` event loop over
   terminal input and those channels.
@@ -158,4 +183,6 @@ cargo fmt
 ```
 
 `tests/smoke.rs` drives the event loop headlessly against ratatui's test
-backend, including agent turns with a scripted provider.
+backend, including agent turns with a scripted provider and a file change
+interrupting a turn. `tests/watch.rs` runs the watcher against the real
+filesystem.

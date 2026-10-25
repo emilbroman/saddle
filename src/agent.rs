@@ -251,6 +251,7 @@ mod tests {
     use super::*;
     use crate::provider::scripted::{ScriptedProvider, Step, text, tool_call};
     use crate::tools::{ProjectFs, Tool, ToolOutput};
+    use crate::watch::Observed;
 
     struct Harness {
         agent: Agent,
@@ -262,7 +263,8 @@ mod tests {
     fn harness(responses: Vec<Vec<Step>>) -> Harness {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("hello.txt"), "hi there\n").unwrap();
-        let mut tools = Registry::read_only(ProjectFs::new(dir.path()).unwrap());
+        let mut tools =
+            Registry::read_only(ProjectFs::new(dir.path()).unwrap(), Observed::default());
         tools.register(Slow);
         let provider = ScriptedProvider::new(responses);
         let (tx, events) = mpsc::unbounded_channel();

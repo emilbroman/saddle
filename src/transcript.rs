@@ -9,6 +9,7 @@ use ratatui::text::{Line, Span};
 const GUTTER: usize = 2;
 const TOOL_CALL_MAX_LINES: usize = 3;
 const TOOL_RESULT_MAX_LINES: usize = 6;
+const CHANGES_MAX_LINES: usize = 2;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StreamState {
@@ -47,6 +48,13 @@ pub enum Entry {
         text: String,
         level: NoticeLevel,
     },
+    /// Saved file changes delivered to the agent.
+    FilesChanged {
+        headline: String,
+        paths: Vec<String>,
+        /// One line per file, shown when expanded.
+        details: Vec<String>,
+    },
 }
 
 #[derive(Debug)]
@@ -83,7 +91,7 @@ impl Transcript {
         for item in &mut self.items {
             if matches!(
                 item.entry,
-                Entry::ToolCall { .. } | Entry::ToolResult { .. }
+                Entry::ToolCall { .. } | Entry::ToolResult { .. } | Entry::FilesChanged { .. }
             ) {
                 item.layout = None;
             }
@@ -228,6 +236,23 @@ fn layout_entry(entry: &Entry, width: usize, expanded: bool) -> Vec<Line<'static
                 NoticeLevel::Error => ("✗", Style::new().fg(Color::Red)),
             };
             (marker, style, style, wrap(text, body_width), None)
+        }
+        Entry::FilesChanged {
+            headline,
+            paths,
+            details,
+        } => {
+            let style = Style::new().fg(Color::Blue);
+            let rows = if expanded {
+                let mut rows = wrap(headline, body_width);
+                for detail in details {
+                    rows.extend(wrap(detail, body_width));
+                }
+                rows
+            } else {
+                wrap(&format!("{headline}: {}", paths.join(", ")), body_width)
+            };
+            ("✎", style, style, rows, Some(CHANGES_MAX_LINES))
         }
     };
 
@@ -448,6 +473,36 @@ mod tests {
         assert_eq!(t.line_count(40), 11);
         t.toggle_expanded();
         assert_eq!(t.line_count(40), total);
+    }
+
+    #[test]
+    fn file_changes_are_one_line_until_expanded() {
+        let mut t = Transcript::default();
+        t.push(Entry::FilesChanged {
+            headline: "2 files changed".into(),
+            paths: vec!["src/a.rs".into(), "src/b.rs".into()],
+            details: vec![
+                "modified src/a.rs (+1 -0)".into(),
+                "deleted src/b.rs".into(),
+            ],
+        });
+        let total = t.line_count(60);
+        assert_eq!(
+            text(&t.lines(60, 0..total)),
+            ["", "✎ 2 files changed: src/a.rs, src/b.rs"]
+        );
+
+        t.toggle_expanded();
+        let total = t.line_count(60);
+        assert_eq!(
+            text(&t.lines(60, 0..total)),
+            [
+                "",
+                "✎ 2 files changed",
+                "  modified src/a.rs (+1 -0)",
+                "  deleted src/b.rs"
+            ]
+        );
     }
 
     #[test]

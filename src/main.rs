@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 use std::process::ExitCode;
+use std::time::Duration;
 
 use anyhow::Context;
 use crossterm::event::EventStream;
@@ -10,6 +11,7 @@ use saddle::agent::{Agent, AgentHandle};
 use saddle::app::{self, App, Status};
 use saddle::provider::GenaiProvider;
 use saddle::tools::{ProjectFs, Registry};
+use saddle::watch::{Observed, WatchConfig, Watcher};
 use saddle::{config, events, project, prompt, tui};
 
 #[tokio::main]
@@ -57,9 +59,20 @@ async fn run() -> anyhow::Result<()> {
     let fs = ProjectFs::new(&project_root)
         .with_context(|| format!("cannot open project root {}", project_root.display()))?;
     let (senders, receivers) = events::channels();
+    let observed = Observed::default();
+    let _watcher = Watcher::spawn(
+        project_root.clone(),
+        WatchConfig {
+            quiet: Duration::from_millis(loaded.config.batching.quiet_ms),
+            max_window: Duration::from_millis(loaded.config.batching.max_window_ms),
+            excluded: loaded.config.writable_paths(&project_root, home.as_deref()),
+        },
+        observed.clone(),
+        senders.fs.clone(),
+    );
     let agent = Agent::new(
         Arc::new(provider),
-        Registry::read_only(fs),
+        Registry::read_only(fs, observed),
         prompt::system(&project_root),
         senders.agent.clone(),
     );

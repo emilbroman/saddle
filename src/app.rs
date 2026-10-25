@@ -1,5 +1,6 @@
 use std::io;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use futures::{Stream, StreamExt};
@@ -14,6 +15,7 @@ use crate::config::{Config, Credentials};
 use crate::events::{AgentEvent, EventReceivers, EventSenders, FsEvent, JobEvent, TurnOutcome};
 use crate::transcript::{Entry, NoticeLevel, Scroll, StreamState, Transcript};
 use crate::ui;
+use crate::watch::{ChangeSet, message};
 
 /// What the status line shows.
 #[derive(Debug, Clone)]
@@ -45,6 +47,8 @@ pub struct App {
     pub scroll: Scroll,
     pub input: TextArea<'static>,
     pub should_quit: bool,
+    /// Change sets waiting for the interrupted turn to wind down.
+    pending_changes: Vec<Arc<ChangeSet>>,
     /// Transcript size from the last render, for scrolling: (total lines, viewport rows).
     pub(crate) transcript_metrics: (usize, usize),
 }
@@ -69,6 +73,7 @@ impl App {
             scroll: Scroll::default(),
             input: new_input(),
             should_quit: false,
+            pending_changes: Vec::new(),
             transcript_metrics: (0, 0),
         }
     }
@@ -154,11 +159,19 @@ impl App {
             AgentEvent::TurnFinished(outcome) => {
                 self.activity = Activity::Idle;
                 self.transcript.finish_assistant(StreamState::Interrupted);
+                let changes = std::mem::take(&mut self.pending_changes);
                 if outcome == TurnOutcome::Interrupted {
                     self.transcript.push(Entry::Notice {
-                        text: "Interrupted.".into(),
+                        text: if changes.is_empty() {
+                            "Interrupted.".into()
+                        } else {
+                            "Interrupted: files changed.".into()
+                        },
                         level: NoticeLevel::Info,
                     });
+                }
+                if !changes.is_empty() {
+                    self.deliver_changes(&changes);
                 }
             }
             AgentEvent::Thinking => self.activity = Activity::Thinking,
@@ -200,12 +213,40 @@ impl App {
         }
     }
 
+    /// File changes always interrupt: a running turn is stopped and the
+    /// changes start a new one once it has wound down.
     pub fn handle_fs_event(&mut self, event: FsEvent) {
         match event {
-            FsEvent::Changed(paths) => self.transcript.push(Entry::Notice {
-                text: format!("{} file(s) changed", paths.len()),
-                level: NoticeLevel::Info,
+            FsEvent::Changed(changes) => {
+                if self.is_busy()
+                    && let Some(agent) = &self.agent
+                {
+                    agent.interrupt();
+                    self.pending_changes.push(changes);
+                } else {
+                    self.deliver_changes(&[changes]);
+                }
+            }
+            FsEvent::Warning(text) => self.transcript.push(Entry::Notice {
+                text,
+                level: NoticeLevel::Error,
             }),
+        }
+    }
+
+    fn deliver_changes(&mut self, sets: &[Arc<ChangeSet>]) {
+        let files: Vec<_> = sets
+            .iter()
+            .flat_map(|set| set.files.iter().cloned())
+            .collect();
+        self.transcript.push(Entry::FilesChanged {
+            headline: message::headline(&files),
+            paths: files.iter().map(|f| f.display.clone()).collect(),
+            details: files.iter().map(message::file_line).collect(),
+        });
+        if let Some(agent) = &self.agent {
+            agent.send(message::describe(&files));
+            self.activity = Activity::Working;
         }
     }
 

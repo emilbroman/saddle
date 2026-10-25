@@ -2,6 +2,8 @@ use futures::future::BoxFuture;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
+use crate::watch::Observed;
+
 use super::{MAX_OUTPUT_BYTES, ProjectFs, Tool, ToolOutput, clip_line, looks_binary, str_arg};
 
 pub const MAX_LINES: usize = 2000;
@@ -10,11 +12,12 @@ const MAX_FILE_BYTES: u64 = 16 * 1024 * 1024;
 
 pub struct ReadFile {
     fs: ProjectFs,
+    observed: Observed,
 }
 
 impl ReadFile {
-    pub fn new(fs: ProjectFs) -> Self {
-        Self { fs }
+    pub fn new(fs: ProjectFs, observed: Observed) -> Self {
+        Self { fs, observed }
     }
 }
 
@@ -64,19 +67,20 @@ impl Tool for ReadFile {
 
     fn call(&self, args: Value) -> BoxFuture<'static, ToolOutput> {
         let fs = self.fs.clone();
+        let observed = self.observed.clone();
         Box::pin(async move {
             let args: Args = match super::parse_args(args) {
                 Ok(args) => args,
                 Err(e) => return e,
             };
-            tokio::task::spawn_blocking(move || read(&fs, args))
+            tokio::task::spawn_blocking(move || read(&fs, &observed, args))
                 .await
                 .unwrap_or_else(|e| ToolOutput::error(format!("read_file failed: {e}")))
         })
     }
 }
 
-fn read(fs: &ProjectFs, args: Args) -> ToolOutput {
+fn read(fs: &ProjectFs, observed: &Observed, args: Args) -> ToolOutput {
     let path = match fs.resolve(&args.path) {
         Ok(path) => path,
         Err(e) => return ToolOutput::error(e.to_string()),
@@ -101,6 +105,7 @@ fn read(fs: &ProjectFs, args: Args) -> ToolOutput {
         Ok(bytes) => bytes,
         Err(e) => return ToolOutput::error(format!("{shown}: {e}")),
     };
+    observed.record_read(&path, &meta, &bytes);
     if looks_binary(&bytes) {
         return ToolOutput::ok(format!(
             "{shown} is a binary file ({} bytes); not shown",
@@ -155,7 +160,7 @@ mod tests {
     fn setup(content: &str) -> (tempfile::TempDir, ReadFile) {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("f.txt"), content).unwrap();
-        let tool = ReadFile::new(ProjectFs::new(dir.path()).unwrap());
+        let tool = ReadFile::new(ProjectFs::new(dir.path()).unwrap(), Observed::default());
         (dir, tool)
     }
 

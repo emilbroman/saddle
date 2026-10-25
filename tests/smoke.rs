@@ -18,6 +18,7 @@ use saddle::events::{self, AgentEvent, EventSenders};
 use saddle::provider::scripted::{ScriptedProvider, Step, text, tool_call};
 use saddle::tools::{ProjectFs, Registry};
 use saddle::transcript::{Entry, NoticeLevel, StreamState};
+use saddle::watch::{Observed, WatchConfig, Watcher};
 
 fn app(senders: EventSenders) -> App {
     let path = PathBuf::from("/cfg");
@@ -204,7 +205,7 @@ async fn agent_turn_runs_tools_and_can_be_interrupted() {
     let (senders, receivers) = events::channels();
     let agent = Agent::new(
         Arc::new(provider.clone()),
-        Registry::read_only(ProjectFs::new(dir.path()).unwrap()),
+        Registry::read_only(ProjectFs::new(dir.path()).unwrap(), Observed::default()),
         "system".into(),
         senders.agent.clone(),
     );
@@ -290,4 +291,114 @@ async fn agent_turn_runs_tools_and_can_be_interrupted() {
     assert!(screen.contains("⚙ read_file hello.txt"), "{screen}");
     assert!(screen.contains("↳ 1    hi there"), "{screen}");
     assert!(screen.contains("[interrupted]"), "{screen}");
+}
+
+#[tokio::test]
+async fn saved_changes_interrupt_the_turn_and_start_a_new_one() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(dir.path()).unwrap();
+    std::fs::write(root.join("hello.txt"), "hi there\n").unwrap();
+    let provider = ScriptedProvider::new([
+        vec![tool_call(
+            "c1",
+            "read_file",
+            serde_json::json!({"path": "hello.txt"}),
+        )],
+        vec![text("Halfway through"), Step::Hang],
+        vec![text("You changed the greeting.")],
+    ]);
+
+    let (senders, receivers) = events::channels();
+    let observed = Observed::default();
+    let _watcher = Watcher::spawn(
+        root.clone(),
+        WatchConfig {
+            quiet: Duration::from_millis(150),
+            max_window: Duration::from_secs(5),
+            excluded: vec![],
+        },
+        observed.clone(),
+        senders.fs.clone(),
+    );
+    let agent = Agent::new(
+        Arc::new(provider.clone()),
+        Registry::read_only(ProjectFs::new(&root).unwrap(), observed),
+        "system".into(),
+        senders.agent.clone(),
+    );
+    let mut app = app(senders);
+    app.attach_agent(AgentHandle::spawn(agent));
+
+    let (input, terminal_events) = mpsc::unbounded();
+    let handle = tokio::spawn(async move {
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        app::run(&mut terminal, &mut app, terminal_events, receivers)
+            .await
+            .unwrap();
+        (terminal, app)
+    });
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    for event in typed("explain hello.txt") {
+        input.unbounded_send(event).unwrap();
+    }
+    input
+        .unbounded_send(key(KeyCode::Enter, KeyModifiers::NONE))
+        .unwrap();
+    // The turn is now hanging mid-stream.
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    std::fs::write(root.join("hello.txt"), "bye there\n").unwrap();
+    tokio::time::sleep(Duration::from_millis(1000)).await;
+    input
+        .unbounded_send(key(KeyCode::Char('c'), KeyModifiers::CONTROL))
+        .unwrap();
+
+    let (terminal, app) = tokio::time::timeout(Duration::from_secs(5), handle)
+        .await
+        .expect("event loop did not quit")
+        .unwrap();
+
+    let entries: Vec<_> = app.transcript.entries().cloned().collect();
+    assert_eq!(
+        entries[3..],
+        [
+            Entry::Assistant {
+                text: "Halfway through".into(),
+                state: StreamState::Interrupted
+            },
+            Entry::Notice {
+                text: "Interrupted: files changed.".into(),
+                level: NoticeLevel::Info
+            },
+            Entry::FilesChanged {
+                headline: "1 file changed".into(),
+                paths: vec!["hello.txt".into()],
+                details: vec!["modified hello.txt (+1 -1)".into()],
+            },
+            Entry::Assistant {
+                text: "You changed the greeting.".into(),
+                state: StreamState::Complete
+            },
+        ]
+    );
+    assert_eq!(app.activity, Activity::Idle);
+
+    let requests = provider.requests.lock().unwrap();
+    assert_eq!(requests.len(), 3);
+    let event = requests[2]
+        .messages
+        .last()
+        .unwrap()
+        .content
+        .first_text()
+        .unwrap();
+    assert!(event.starts_with("<file-changes>"), "{event}");
+    assert!(
+        event.contains(
+            "modified hello.txt (+1 -1)\n```diff\n@@ -1 +1 @@\n-hi there\n+bye there\n```"
+        ),
+        "{event}"
+    );
+
+    let screen = screen(&terminal);
+    assert!(screen.contains("✎ 1 file changed: hello.txt"), "{screen}");
 }

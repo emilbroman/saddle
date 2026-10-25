@@ -17,6 +17,8 @@ pub use grep::Grep;
 pub use list::{Glob, List};
 pub use read_file::ReadFile;
 
+use crate::watch::Observed;
+
 /// Upper bound on any tool result sent to the model, in bytes.
 pub const MAX_OUTPUT_BYTES: usize = 50 * 1024;
 
@@ -58,10 +60,11 @@ pub struct Registry {
 }
 
 impl Registry {
-    /// The read-only file tools over `fs`.
-    pub fn read_only(fs: ProjectFs) -> Self {
+    /// The read-only file tools over `fs`. Files read in full are recorded in
+    /// `observed`, so that later changes to them can be shown as diffs.
+    pub fn read_only(fs: ProjectFs, observed: Observed) -> Self {
         let mut registry = Self::default();
-        registry.register(ReadFile::new(fs.clone()));
+        registry.register(ReadFile::new(fs.clone(), observed));
         registry.register(List::new(fs.clone()));
         registry.register(Glob::new(fs.clone()));
         registry.register(Grep::new(fs));
@@ -224,7 +227,8 @@ mod tests {
     #[tokio::test]
     async fn registry_reports_unknown_tools() {
         let dir = tempfile::tempdir().unwrap();
-        let registry = Registry::read_only(ProjectFs::new(dir.path()).unwrap());
+        let registry =
+            Registry::read_only(ProjectFs::new(dir.path()).unwrap(), Observed::default());
         let output = registry.call("write_file", json!({})).await;
         assert!(output.is_error);
         assert!(output.content.contains("read_file, list, glob, grep"));

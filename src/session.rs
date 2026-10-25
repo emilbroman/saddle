@@ -106,6 +106,17 @@ struct Inner {
     failed: bool,
 }
 
+impl Drop for Inner {
+    fn drop(&mut self) {
+        use std::os::fd::AsRawFd;
+        // A concurrent fork can briefly inherit this descriptor before exec.
+        // Release our lock now rather than waiting for that child to close it.
+        unsafe {
+            libc::flock(self._lock.as_raw_fd(), libc::LOCK_UN);
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct Session {
     dir: Arc<PathBuf>,
@@ -471,6 +482,18 @@ mod tests {
             fn_arguments: serde_json::json!({"path":"src/a.rs"}),
             thought_signatures: Some(vec!["opaque-call-signature".into()]),
         }
+    }
+
+    #[test]
+    fn inherited_descriptor_does_not_prolong_a_closed_session_lock() {
+        let fixture = Fixture::new();
+        let (session, _) = fixture.open();
+        let inherited = session.inner.lock().unwrap()._lock.try_clone().unwrap();
+        drop(session);
+        let (reopened, _) = fixture.open();
+        assert!(Session::open_in(fixture.root.path(), fixture.data.path()).is_err());
+        drop(inherited);
+        drop(reopened);
     }
 
     #[test]

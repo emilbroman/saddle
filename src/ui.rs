@@ -85,6 +85,16 @@ fn render_status(frame: &mut Frame, app: &App, area: Rect) {
             base.fg(Color::Yellow),
         ),
     ];
+    spans.push(Span::styled(
+        format!(
+            " context: {}/{} ",
+            app.prompt_tokens
+                .map(|n| n.to_string())
+                .unwrap_or_else(|| "—".into()),
+            app.config.context_window
+        ),
+        base,
+    ));
     if let Some(hint) = &status.web_search {
         spans.push(Span::styled(format!(" {hint} "), base.fg(Color::Yellow)));
     }

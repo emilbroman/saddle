@@ -22,7 +22,8 @@ ratatui = "0.30.2"
 ratatui-textarea = "0.9.3"
 regex = "1.13.1"
 reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
-serde = { version = "1", features = ["derive"] }
+serde = { version = "1", features = ["derive", "rc"] }
+sha2 = "0.10"
 serde_json = "1.0.154"
 similar = "3"
 tempfile = "3"

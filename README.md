@@ -76,6 +76,43 @@ Shift+Enter needs a terminal that supports the kitty keyboard protocol (kitty,
 WezTerm, Ghostty, recent iTerm2); elsewhere use Alt+Enter or Ctrl+J. Other keys
 edit the input with Emacs-style bindings.
 
+### Sessions and context
+
+Saddle keeps one living conversation per git worktree, or per directory outside
+Git. Sessions are stored under `$XDG_DATA_HOME/saddle/sessions/<key>/`, falling
+back to `~/.local/share/saddle/sessions/<key>/` (also on macOS). The key is a
+stable hash of the canonical project root. No session data goes into the
+repository or its git directory. Moving or renaming a worktree starts a new
+session; different worktrees have independent conversations. A lock refuses a
+second Saddle instance on the same worktree.
+
+Reopening restores the full transcript, scrolled to the end, with tool results
+collapsed. If nothing changed, resume is silent: no agent turn starts. Edits made
+while Saddle was closed are reported as diffs against the last content Saddle
+observed. Files whose current content matches `HEAD` are folded silently into
+the snapshots; git-movement notifications are a follow-up feature, not yet
+available. Shell jobs do not survive exit or restart; pending restored job
+handles are reported as lost when resuming.
+
+Send `/new` to archive the current log and start an empty conversation, resetting
+the file snapshots and saved git state. This command is idle-only: press Esc
+first if a turn is running. Archives stay on disk, but cannot be browsed or
+resumed in Saddle yet.
+
+The status line shows the last request's provider-reported prompt tokens over
+`context_window` (default **128000** tokens). Set it to suit your model. Before
+each request, Saddle estimates its size from the last reported usage plus new
+content, or a serialized-content estimate before usage is available. When the
+budget fills, it drops the oldest turns from the model request, keeping the
+system prompt and whole tool round-trips intact. A one-line notice reports this
+truncation; the on-disk log and visible transcript retain everything. On a
+provider context-length error, Saddle truncates further and retries once. There
+is no summarising compaction. The latest input and newest tool round-trip are
+retained; if these and the system prompt alone exceed the model limit, the
+provider error is shown rather than splitting a tool exchange.
+
+Session and resume behavior on macOS remains pending user verification.
+
 ## Configuration
 
 Saddle reads two files from `$XDG_CONFIG_HOME/saddle/`, or `~/.config/saddle/`
@@ -92,6 +129,7 @@ base_url = "https://litellm.bb3.internal/v1/"   # the API family's path is appen
 
 # Optional
 max_tokens = 16384                       # output limit per model response (default 16384)
+context_window = 128000                  # positive token budget for model requests (default 128000)
 reasoning_effort = "medium"              # none, minimal, low, medium, high, xhigh, max, or a token budget
 ca_file = "~/.config/saddle/bb3_root_ca.crt"    # extra trusted CA (PEM), on top of the system store
 
@@ -307,6 +345,8 @@ A single crate with a library (`src/lib.rs`) and a thin binary (`src/main.rs`):
 
 - `config` — typed `config.toml` / `credentials.toml` loading and validation.
 - `project` — project-root resolution.
+- `session` — durable per-worktree event log, instance lock and resume state.
+- `context` — request-only leading truncation against the configured token budget.
 - `transcript` — the conversation model (user, assistant, tool call/result and
   notice entries), its wrapped layout and the transcript scroll state.
 - `events` — channels for agent, filesystem, job and language-server events.

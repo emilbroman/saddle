@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
 
+use serde::{Deserialize, Serialize};
 use similar::{ChangeTag, TextDiff};
 
 use super::batch::Batch;
@@ -18,7 +19,7 @@ use crate::tools::looks_binary;
 /// Files larger than this are reported by path and size only.
 pub const MAX_SNAPSHOT_BYTES: u64 = 1024 * 1024;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 enum Content {
     Text(Arc<str>),
     Binary,
@@ -28,7 +29,7 @@ enum Content {
     Symlink,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct Known {
     len: u64,
     modified: Option<SystemTime>,
@@ -43,14 +44,64 @@ impl Known {
 
 /// Shared between the watcher, which compares batches against it, and
 /// `read_file`, which records what the agent has seen.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct Snapshot(BTreeMap<PathBuf, Known>);
+
+type Persistence = Arc<dyn Fn(Snapshot) + Send + Sync>;
+
+#[derive(Clone, Default)]
 pub struct Observed {
     files: Arc<Mutex<BTreeMap<PathBuf, Known>>>,
+    persistence: Arc<Mutex<Option<Persistence>>>,
+}
+
+impl std::fmt::Debug for Observed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Observed")
+            .field("files", &self.files)
+            .finish_non_exhaustive()
+    }
 }
 
 impl Observed {
+    pub fn snapshot(&self) -> Snapshot {
+        Snapshot(self.files.lock().unwrap().clone())
+    }
+
+    pub fn restore(&self, snapshot: Snapshot) {
+        let persistence = self.persistence.lock().unwrap();
+        *self.files.lock().unwrap() = snapshot.0;
+        self.persist(&persistence);
+    }
+
+    /// The callback may read snapshots but must not mutate this store.
+    pub fn set_persistence(&self, callback: Persistence) {
+        *self.persistence.lock().unwrap() = Some(callback);
+    }
+
+    fn persist(&self, persistence: &Option<Persistence>) {
+        if let Some(callback) = persistence {
+            callback(self.snapshot());
+        }
+    }
+
+    /// Restore a snapshot before calling this; seeding first hides new files.
+    pub fn resume(&self, root: &Path, excluded: Vec<PathBuf>) -> Vec<FileChange> {
+        let mut filter = Filter::new(root, excluded);
+        let mut changes = self.compare(
+            &mut filter,
+            Batch {
+                paths: BTreeSet::new(),
+                rescan: true,
+            },
+        );
+        changes.retain(|change| !equals_head(root, &change.path));
+        changes
+    }
+
     /// Records a file the agent read in full, so later changes to it are diffed.
     pub fn record_read(&self, path: &Path, meta: &Metadata, bytes: &[u8]) {
+        let persistence = self.persistence.lock().unwrap();
         let content = classify(bytes);
         let known = Known {
             len: bytes.len() as u64,
@@ -58,11 +109,13 @@ impl Observed {
             content,
         };
         self.files.lock().unwrap().insert(path.to_owned(), known);
+        self.persist(&persistence);
     }
 
     /// Records the existence (not the content) of every reportable file, so
     /// that later events can tell created files from modified ones.
     pub fn seed(&self, filter: &Filter) {
+        let persistence = self.persistence.lock().unwrap();
         let found: Vec<_> = filter
             .walk(filter.root())
             .flatten()
@@ -73,15 +126,18 @@ impl Observed {
         for (path, meta) in found {
             files.entry(path).or_insert_with(|| unread(&meta));
         }
+        drop(files);
+        self.persist(&persistence);
     }
 
     /// Re-reads every path the batch invalidated and reports what actually
     /// changed since Saddle last looked, updating the record as it goes.
     pub fn compare(&self, filter: &mut Filter, batch: Batch) -> Vec<FileChange> {
+        let persistence = self.persistence.lock().unwrap();
         let mut files = self.files.lock().unwrap();
         let candidates = expand(filter, &files, batch);
         let root = filter.root().to_owned();
-        candidates
+        let changes = candidates
             .into_iter()
             .filter_map(|path| {
                 let kind_detail = compare_one(&mut files, &path)?;
@@ -92,8 +148,85 @@ impl Observed {
                     detail: kind_detail.1,
                 })
             })
-            .collect()
+            .collect();
+        drop(files);
+        self.persist(&persistence);
+        changes
     }
+}
+
+fn equals_head(root: &Path, path: &Path) -> bool {
+    use std::process::Command;
+
+    let Ok(relative) = path.strip_prefix(root) else {
+        return false;
+    };
+    let Ok(metadata) = fs::symlink_metadata(path) else {
+        return false;
+    };
+    let Ok(tree) = Command::new("git")
+        .arg("--literal-pathspecs")
+        .arg("-C")
+        .arg(root)
+        .args(["ls-tree", "-z", "HEAD", "--"])
+        .arg(relative)
+        .output()
+    else {
+        return false;
+    };
+    if !tree.status.success() {
+        return false;
+    }
+    let Some(tab) = tree.stdout.iter().position(|b| *b == b'\t') else {
+        return false;
+    };
+    let header = String::from_utf8_lossy(&tree.stdout[..tab]);
+    let mut fields = header.split_whitespace();
+    let (Some(mode), Some("blob"), Some(oid)) = (fields.next(), fields.next(), fields.next())
+    else {
+        return false;
+    };
+    if tree.stdout[tab + 1..].strip_suffix(&[0]) != Some(relative.as_os_str().as_encoded_bytes()) {
+        return false;
+    }
+    let mut hash = Command::new("git");
+    hash.arg("-C")
+        .arg(root)
+        .args(["hash-object", "--no-filters"]);
+    let result = if metadata.file_type().is_symlink() && mode == "120000" {
+        use std::io::Write;
+        use std::process::Stdio;
+
+        let Ok(target) = fs::read_link(path) else {
+            return false;
+        };
+        let Ok(mut child) = hash
+            .arg("--stdin")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+        else {
+            return false;
+        };
+        let written = child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(target.as_os_str().as_encoded_bytes());
+        let output = child.wait_with_output();
+        if written.is_err() {
+            return false;
+        }
+        output
+    } else if metadata.is_file() && matches!(mode, "100644" | "100755") {
+        hash.arg("--").arg(path).output()
+    } else {
+        return false;
+    };
+    result.is_ok_and(|hash| {
+        hash.status.success() && String::from_utf8_lossy(&hash.stdout).trim() == oid
+    })
 }
 
 /// Turns invalidated paths into the files to compare: directories stand for
@@ -319,6 +452,101 @@ mod tests {
                 .map(|c| (c.kind, c.display, c.detail))
                 .collect()
         }
+    }
+
+    fn restored(observed: &Observed) -> Observed {
+        let bytes = serde_json::to_vec(&observed.snapshot()).unwrap();
+        let snapshot = serde_json::from_slice(&bytes).unwrap();
+        let result = Observed::default();
+        result.restore(snapshot);
+        result
+    }
+
+    #[test]
+    fn resume_unchanged_is_silent_and_offline_edits_diff_against_snapshot() {
+        let p = Project::new();
+        p.read("src/main.rs");
+        let observed = restored(&p.observed);
+        assert!(observed.resume(&p.root, vec![p.path("target")]).is_empty());
+        p.write("src/main.rs", "fn main() {}\n");
+        p.write("new.txt", "new\n");
+        let changes = observed.resume(&p.root, vec![p.path("target")]);
+        assert_eq!(changes.len(), 2);
+        assert_eq!(changes[0].kind, ChangeKind::Created);
+        assert!(
+            matches!(&changes[1].detail, Detail::Diff { diff, .. } if diff.contains("println!"))
+        );
+        assert!(observed.resume(&p.root, vec![p.path("target")]).is_empty());
+    }
+
+    #[test]
+    fn resume_folds_exact_head_content_but_not_other_edits() {
+        use std::process::Command;
+        let p = Project::new();
+        let git = |args: &[&str]| {
+            let output = Command::new("git")
+                .arg("-C")
+                .arg(&p.root)
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        };
+        git(&["init", "--quiet"]);
+        p.write("src/[special] name.rs", "head\n");
+        git(&["add", "."]);
+        git(&[
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.invalid",
+            "commit",
+            "--quiet",
+            "-m",
+            "initial",
+        ]);
+        p.write("src/main.rs", "uncommitted old contents\n");
+        p.write("src/[special] name.rs", "uncommitted\n");
+        p.read("src/main.rs");
+        p.read("src/[special] name.rs");
+        p.read("src/lib.rs");
+        let observed = restored(&p.observed);
+        git(&["restore", "src/main.rs", "src/[special] name.rs"]);
+        p.write("src/lib.rs", "still a user edit\n");
+        let changes = observed.resume(&p.root, vec![p.path("target")]);
+        assert_eq!(changes.len(), 1);
+        assert_eq!(changes[0].display, "src/lib.rs");
+        assert!(observed.resume(&p.root, vec![p.path("target")]).is_empty());
+        p.write("src/main.rs", "another edit\n");
+        let changes = observed.resume(&p.root, vec![p.path("target")]);
+        assert!(
+            matches!(&changes[0].detail, Detail::Diff { diff, .. } if diff.contains("println!") && !diff.contains("uncommitted old"))
+        );
+    }
+
+    #[test]
+    fn persistence_callback_observes_mutations_and_can_read_snapshots() {
+        let mut p = Project::new();
+        let persisted = Arc::new(Mutex::new(Vec::new()));
+        let values = persisted.clone();
+        let observed = p.observed.clone();
+        p.observed.set_persistence(Arc::new(move |snapshot| {
+            assert_eq!(
+                serde_json::to_value(&snapshot).unwrap(),
+                serde_json::to_value(observed.snapshot()).unwrap()
+            );
+            values.lock().unwrap().push(snapshot);
+        }));
+        p.read("src/main.rs");
+        p.write("src/main.rs", "changed\n");
+        p.compare(&["src/main.rs"]);
+        p.observed.seed(&p.filter);
+        assert_eq!(persisted.lock().unwrap().len(), 3);
+        p.observed.set_persistence(Arc::new(|_| {}));
     }
 
     #[test]

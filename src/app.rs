@@ -17,9 +17,11 @@ use crate::events::{
     AgentEvent, EventReceivers, EventSenders, FsEvent, JobEvent, LspEvent, TurnOutcome,
 };
 use crate::lsp::{ServerState, ServerStatus};
+use crate::session::{LogEvent, Restored, Session};
 use crate::transcript::{Entry, NoticeLevel, Scroll, StreamState, Transcript};
 use crate::ui;
 use crate::watch::{ChangeSet, message};
+use crate::watch::{Observed, filter::Filter};
 
 /// What the status line shows.
 #[derive(Debug, Clone)]
@@ -49,6 +51,10 @@ pub struct App {
     pub status: Status,
     pub agent: Option<AgentHandle>,
     pub activity: Activity,
+    pub prompt_tokens: Option<usize>,
+    session: Option<Session>,
+    observed: Option<Observed>,
+    snapshot_excluded: Vec<PathBuf>,
     pub transcript: Transcript,
     pub scroll: Scroll,
     pub input: TextArea<'static>,
@@ -79,6 +85,10 @@ impl App {
             status,
             agent: None,
             activity: Activity::Idle,
+            prompt_tokens: None,
+            session: None,
+            observed: None,
+            snapshot_excluded: Vec::new(),
             transcript: Transcript::default(),
             scroll: Scroll::default(),
             input: new_input(),
@@ -89,6 +99,91 @@ impl App {
             running_jobs: BTreeMap::new(),
             transcript_metrics: (0, 0),
         }
+    }
+
+    pub fn attach_session(
+        &mut self,
+        session: Session,
+        restored: Restored,
+        observed: Observed,
+        excluded: Vec<PathBuf>,
+    ) {
+        self.transcript = Transcript::restore(restored.ui);
+        self.transcript.attach_session(session.clone());
+        self.prompt_tokens = restored.prompt_tokens;
+        self.session = Some(session);
+        self.observed = Some(observed);
+        self.snapshot_excluded = excluded;
+        self.scroll.bottom();
+    }
+
+    /// Resume inputs are combined into one turn; unchanged sessions stay silent.
+    pub fn resume(&mut self, changes: ChangeSet, lost_jobs: BTreeMap<u64, String>) {
+        let mut inputs = Vec::new();
+        if !changes.files.is_empty() {
+            let diagnostics: Vec<_> = changes.diagnostics.as_deref().into_iter().collect();
+            self.record_changes(&changes.files, &diagnostics);
+            inputs.push(message::describe(&changes.files));
+            inputs.extend(diagnostics.into_iter().map(str::to_owned));
+        }
+        if !lost_jobs.is_empty() {
+            let text = format!(
+                "Shell jobs from the previous run are lost and cannot be waited on:\n{}",
+                lost_jobs
+                    .iter()
+                    .map(|(id, command)| format!("job {id}: {}", one_line(command)))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            );
+            self.notice(text.clone(), false);
+            inputs.push(text);
+            for id in lost_jobs.keys() {
+                self.persist(LogEvent::JobFinished { id: *id });
+            }
+        }
+        if !inputs.is_empty()
+            && let Some(agent) = &self.agent
+        {
+            agent.send(inputs.join("\n\n"));
+            self.activity = Activity::Working;
+        }
+    }
+
+    fn persist(&mut self, event: LogEvent) {
+        if let Some(session) = &self.session
+            && let Err(error) = session.append(event)
+        {
+            self.notice(format!("Cannot save the conversation: {error:#}"), true);
+            self.should_quit = true;
+        }
+    }
+
+    fn new_session(&mut self) {
+        let Some(session) = self.session.clone() else {
+            return;
+        };
+        if let Err(error) = session.reset() {
+            self.notice(format!("Cannot start a new conversation: {error:#}"), true);
+            return;
+        }
+        if let Some(agent) = &self.agent {
+            agent.reset();
+        }
+        self.transcript = Transcript::default();
+        self.transcript.attach_session(session);
+        self.prompt_tokens = None;
+        self.pending_changes.clear();
+        if let Some(observed) = &self.observed {
+            observed.restore(Default::default());
+            observed.seed(&Filter::new(
+                &self.project_root,
+                self.snapshot_excluded.clone(),
+            ));
+        }
+        for (id, command) in self.running_jobs.clone() {
+            self.persist(LogEvent::JobStarted { id, command });
+        }
+        self.scroll.bottom();
     }
 
     pub fn attach_agent(&mut self, agent: AgentHandle) {
@@ -152,6 +247,10 @@ impl App {
             return;
         }
         self.input = new_input();
+        if text.trim() == "/new" {
+            self.new_session();
+            return;
+        }
         self.transcript.push(Entry::User { text: text.clone() });
         match &self.agent {
             Some(agent) => {
@@ -168,6 +267,10 @@ impl App {
 
     pub fn handle_agent_event(&mut self, event: AgentEvent) {
         match event {
+            AgentEvent::Usage { prompt_tokens } => {
+                self.prompt_tokens = Some(prompt_tokens);
+                self.persist(LogEvent::Usage { prompt_tokens });
+            }
             AgentEvent::TurnStarted => self.activity = Activity::Working,
             AgentEvent::TurnFinished(outcome) => {
                 self.activity = Activity::Idle;
@@ -187,7 +290,7 @@ impl App {
                         level: NoticeLevel::Info,
                     });
                 }
-                if !changes.is_empty() {
+                if !changes.is_empty() && !self.should_quit {
                     self.deliver_changes(&changes);
                 }
             }
@@ -267,13 +370,7 @@ impl App {
             .iter()
             .filter_map(|s| s.diagnostics.as_deref())
             .collect();
-        let mut details: Vec<_> = files.iter().map(message::file_line).collect();
-        details.extend(diagnostics.iter().map(|s| (*s).to_owned()));
-        self.transcript.push(Entry::FilesChanged {
-            headline: message::headline(&files),
-            paths: files.iter().map(|f| f.display.clone()).collect(),
-            details,
-        });
+        self.record_changes(&files, &diagnostics);
         if let Some(agent) = &self.agent {
             let mut text = message::describe(&files);
             for diagnostic in diagnostics {
@@ -283,6 +380,16 @@ impl App {
             agent.send(text);
             self.activity = Activity::Working;
         }
+    }
+
+    fn record_changes(&mut self, files: &[crate::watch::FileChange], diagnostics: &[&str]) {
+        let mut details: Vec<_> = files.iter().map(message::file_line).collect();
+        details.extend(diagnostics.iter().map(|s| (*s).to_owned()));
+        self.transcript.push(Entry::FilesChanged {
+            headline: message::headline(files),
+            paths: files.iter().map(|f| f.display.clone()).collect(),
+            details,
+        });
     }
 
     pub fn handle_lsp_event(&mut self, event: LspEvent) {
@@ -320,9 +427,14 @@ impl App {
     pub fn handle_job_event(&mut self, event: JobEvent) {
         match event {
             JobEvent::Started { id, command } => {
+                self.persist(LogEvent::JobStarted {
+                    id,
+                    command: command.clone(),
+                });
                 self.running_jobs.insert(id, command);
             }
             JobEvent::Finished { id, summary } => {
+                self.persist(LogEvent::JobFinished { id });
                 let command = self.running_jobs.remove(&id).unwrap_or_default();
                 self.notice(format!("job {id} {summary}: {}", one_line(&command)), false);
             }
@@ -376,7 +488,7 @@ pub async fn run<B, S>(
     terminal: &mut Terminal<B>,
     app: &mut App,
     mut terminal_events: S,
-    mut events: EventReceivers,
+    events: &mut EventReceivers,
 ) -> anyhow::Result<()>
 where
     B: Backend,
@@ -403,6 +515,9 @@ where
             Some(event) = events.lsp.recv() => app.handle_lsp_event(event),
         }
 
+        if let Some(error) = app.transcript.take_persistence_error() {
+            anyhow::bail!(error);
+        }
         if app.should_quit {
             return Ok(());
         }

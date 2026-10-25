@@ -133,6 +133,12 @@ pub struct Jobs {
 }
 
 impl Jobs {
+    /// Handles from restored conversations must never refer to a new job.
+    pub fn resume_after(&self, last_id: u64) {
+        let mut state = self.state.lock().unwrap();
+        state.next_id = state.next_id.max(last_id);
+    }
+
     pub fn new(sandbox: Arc<Sandbox>, events: mpsc::UnboundedSender<JobEvent>) -> Self {
         Self {
             state: Arc::default(),

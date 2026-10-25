@@ -26,6 +26,9 @@ pub struct Agent {
     system: String,
     messages: Vec<ChatMessage>,
     events: mpsc::UnboundedSender<AgentEvent>,
+    session: Option<crate::session::Session>,
+    context: crate::context::ContextBudget,
+    storage_failed: bool,
 }
 
 impl Agent {
@@ -41,110 +44,204 @@ impl Agent {
             system,
             messages: Vec::new(),
             events,
+            session: None,
+            context: crate::context::ContextBudget::new(128_000),
+            storage_failed: false,
         }
+    }
+
+    pub fn with_session(
+        mut self,
+        session: crate::session::Session,
+        messages: Vec<ChatMessage>,
+    ) -> Self {
+        self.session = Some(session);
+        self.messages = messages;
+        self
+    }
+
+    pub fn with_context_window(mut self, tokens: usize) -> Self {
+        self.context = crate::context::ContextBudget::new(tokens);
+        self
     }
 
     pub fn messages(&self) -> &[ChatMessage] {
         &self.messages
     }
 
+    fn reset(&mut self) {
+        self.messages.clear();
+        self.context.reset();
+        self.storage_failed = false;
+    }
+
     fn emit(&self, event: AgentEvent) {
-        // The UI only goes away on shutdown, when nobody cares any more.
         let _ = self.events.send(event);
     }
 
-    /// Adds a user message and runs a turn on it.
+    fn persist(&mut self, event: crate::session::LogEvent) -> bool {
+        if self.storage_failed {
+            return false;
+        }
+        if let Some(session) = &self.session
+            && let Err(error) = session.append(event)
+        {
+            self.storage_failed = true;
+            self.emit(AgentEvent::Error(format!(
+                "Cannot save conversation: {error}"
+            )));
+            return false;
+        }
+        true
+    }
+
+    fn append(&mut self, message: ChatMessage) -> bool {
+        if !self.persist(crate::session::LogEvent::Model(message.clone())) {
+            return false;
+        }
+        self.messages.push(message);
+        true
+    }
+
     pub async fn submit(&mut self, text: String, cancel: &CancellationToken) -> TurnOutcome {
-        self.messages.push(ChatMessage::user(text));
         self.emit(AgentEvent::TurnStarted);
-        let outcome = self.run_turn(cancel).await;
+        let outcome = if self.storage_failed {
+            self.emit(AgentEvent::Error(
+                "Conversation storage failed; restart before continuing.".into(),
+            ));
+            TurnOutcome::Failed
+        } else if self.append(ChatMessage::user(text)) {
+            self.run_turn(cancel).await
+        } else {
+            TurnOutcome::Failed
+        };
         self.emit(AgentEvent::TurnFinished(outcome));
         outcome
     }
 
     async fn run_turn(&mut self, cancel: &CancellationToken) -> TurnOutcome {
+        let mut retried = false;
+        let mut force_truncate = false;
         for _ in 0..MAX_ROUNDS {
-            if cancel.is_cancelled() {
-                return TurnOutcome::Interrupted;
-            }
-            let request = ChatRequest::new(self.messages.clone())
-                .with_system(self.system.clone())
-                .with_tools(self.tools.definitions());
-
-            let stream = tokio::select! {
-                biased;
-                _ = cancel.cancelled() => return TurnOutcome::Interrupted,
-                stream = self.provider.stream(request) => stream,
-            };
-            let mut stream = match stream {
-                Ok(stream) => stream,
-                Err(e) => {
-                    self.emit(AgentEvent::Error(e.0));
-                    return TurnOutcome::Failed;
+            let completion = 'request: loop {
+                if cancel.is_cancelled() {
+                    return TurnOutcome::Interrupted;
                 }
-            };
-
-            let mut text = String::new();
-            let mut thinking = false;
-            let completion = loop {
-                let event = tokio::select! {
+                let mut request = ChatRequest::new(self.messages.clone())
+                    .with_system(self.system.clone())
+                    .with_tools(self.tools.definitions());
+                if self.context.prepare(&mut request, force_truncate) {
+                    self.emit(AgentEvent::Notice("Context shortened: older messages omitted from this request; full history is saved.".into()));
+                }
+                force_truncate = false;
+                let stream = tokio::select! {
                     biased;
-                    _ = cancel.cancelled() => {
-                        self.keep_partial(text);
-                        self.emit(AgentEvent::AssistantDone { interrupted: true });
-                        return TurnOutcome::Interrupted;
-                    }
-                    event = stream.next() => event,
+                    _ = cancel.cancelled() => return TurnOutcome::Interrupted,
+                    stream = self.provider.stream(request) => stream,
                 };
-                match event {
-                    Some(Ok(StreamEvent::Text(delta))) => {
-                        text.push_str(&delta);
-                        self.emit(AgentEvent::AssistantDelta(delta));
+                let mut stream = match stream {
+                    Ok(stream) => stream,
+                    Err(e) if e.is_context_length() && !retried => {
+                        retried = true;
+                        force_truncate = true;
+                        continue 'request;
                     }
-                    Some(Ok(StreamEvent::Reasoning(_))) => {
-                        if !thinking {
-                            thinking = true;
-                            self.emit(AgentEvent::Thinking);
-                        }
-                    }
-                    Some(Ok(StreamEvent::End(completion))) => break completion,
-                    Some(Err(e)) => {
-                        self.keep_partial(text);
+                    Err(e) => {
                         self.emit(AgentEvent::Error(e.0));
                         return TurnOutcome::Failed;
                     }
-                    None => {
-                        self.keep_partial(text);
-                        self.emit(AgentEvent::Error(
-                            "The inference stream ended without finishing the response.".into(),
-                        ));
-                        return TurnOutcome::Failed;
+                };
+                let mut text = String::new();
+                let mut thinking = false;
+                loop {
+                    let event = tokio::select! {
+                        biased;
+                        _ = cancel.cancelled() => {
+                            if !self.keep_partial(text) { return TurnOutcome::Failed; }
+                            self.emit(AgentEvent::AssistantDone { interrupted: true });
+                            return TurnOutcome::Interrupted;
+                        }
+                        event = stream.next() => event,
+                    };
+                    match event {
+                        Some(Ok(StreamEvent::Text(delta))) => {
+                            if !self
+                                .persist(crate::session::LogEvent::AssistantDelta(delta.clone()))
+                            {
+                                return TurnOutcome::Failed;
+                            }
+                            text.push_str(&delta);
+                            self.emit(AgentEvent::AssistantDelta(delta));
+                        }
+                        Some(Ok(StreamEvent::Reasoning(_))) => {
+                            if !thinking {
+                                thinking = true;
+                                self.emit(AgentEvent::Thinking);
+                            }
+                        }
+                        Some(Ok(StreamEvent::End(completion))) => break 'request completion,
+                        Some(Err(e))
+                            if e.is_context_length()
+                                && !retried
+                                && text.is_empty()
+                                && !thinking =>
+                        {
+                            retried = true;
+                            force_truncate = true;
+                            continue 'request;
+                        }
+                        Some(Err(e)) => {
+                            self.keep_partial(text);
+                            self.emit(AgentEvent::Error(e.0));
+                            return TurnOutcome::Failed;
+                        }
+                        None => {
+                            self.keep_partial(text);
+                            self.emit(AgentEvent::Error(
+                                "The inference stream ended without finishing the response.".into(),
+                            ));
+                            return TurnOutcome::Failed;
+                        }
                     }
                 }
             };
             self.emit(AgentEvent::AssistantDone { interrupted: false });
+            if let Some(prompt_tokens) = completion.prompt_tokens {
+                self.context.observe(prompt_tokens);
+                self.emit(AgentEvent::Usage { prompt_tokens });
+            }
             if completion.truncated {
                 self.emit(AgentEvent::Notice(
                     "The response hit the output token limit (`max_tokens` in config.toml).".into(),
                 ));
             }
-
             let calls: Vec<_> = completion
                 .content
                 .tool_calls()
                 .into_iter()
                 .cloned()
                 .collect();
-            if !completion.content.is_empty() {
-                self.messages
-                    .push(ChatMessage::assistant(completion.content));
+            if !completion.content.is_empty()
+                && !self.append(ChatMessage::assistant(completion.content))
+            {
+                return TurnOutcome::Failed;
             }
             if calls.is_empty() {
                 return TurnOutcome::Completed;
             }
 
-            let mut responses = Vec::with_capacity(calls.len());
-            for call in &calls {
+            for (index, call) in calls.iter().enumerate() {
+                if cancel.is_cancelled() {
+                    for pending in &calls[index..] {
+                        if !self.push_tool_response(ToolResponse::new(
+                            &pending.call_id,
+                            INTERRUPTED_TOOL,
+                        )) {
+                            return TurnOutcome::Failed;
+                        }
+                    }
+                    return TurnOutcome::Interrupted;
+                }
                 self.emit(AgentEvent::ToolCall {
                     id: call.call_id.clone(),
                     name: call.fn_name.clone(),
@@ -164,67 +261,52 @@ impl Agent {
                         output = run.future => Some(output),
                     }
                 };
-                let Some(output) = output else {
-                    // Every call needs a response or the next request is rejected.
-                    for pending in &calls[responses.len()..] {
-                        responses.push(ToolResponse::new(&pending.call_id, INTERRUPTED_TOOL));
+                let (content, display, is_error) = match output {
+                    Some(output) => {
+                        let content = if output.is_error {
+                            format!("Error: {}", output.content)
+                        } else {
+                            output.content.clone()
+                        };
+                        (content, output.content, output.is_error)
                     }
-                    self.emit(AgentEvent::ToolResult {
-                        call_id: call.call_id.clone(),
-                        output: "interrupted".into(),
-                        is_error: true,
-                    });
-                    self.push_tool_responses(responses);
-                    return TurnOutcome::Interrupted;
+                    None => (INTERRUPTED_TOOL.into(), "interrupted".into(), true),
                 };
-                if cancel.is_cancelled() {
-                    // The tool reported its partial result; the rest never ran.
-                    self.emit(AgentEvent::ToolResult {
-                        call_id: call.call_id.clone(),
-                        output: output.content.clone(),
-                        is_error: output.is_error,
-                    });
-                    responses.push(ToolResponse::new(&call.call_id, output.content));
-                    for pending in &calls[responses.len()..] {
-                        responses.push(ToolResponse::new(&pending.call_id, INTERRUPTED_TOOL));
-                    }
-                    self.push_tool_responses(responses);
-                    return TurnOutcome::Interrupted;
+                if !self.push_tool_response(ToolResponse::new(&call.call_id, content)) {
+                    return TurnOutcome::Failed;
                 }
                 self.emit(AgentEvent::ToolResult {
                     call_id: call.call_id.clone(),
-                    output: output.content.clone(),
-                    is_error: output.is_error,
+                    output: display,
+                    is_error,
                 });
-                let content = if output.is_error {
-                    format!("Error: {}", output.content)
-                } else {
-                    output.content
-                };
-                responses.push(ToolResponse::new(&call.call_id, content));
+                if cancel.is_cancelled() {
+                    for pending in &calls[index + 1..] {
+                        if !self.push_tool_response(ToolResponse::new(
+                            &pending.call_id,
+                            INTERRUPTED_TOOL,
+                        )) {
+                            return TurnOutcome::Failed;
+                        }
+                    }
+                    return TurnOutcome::Interrupted;
+                }
             }
-            self.push_tool_responses(responses);
         }
-
         self.emit(AgentEvent::Notice(format!(
             "Stopped after {MAX_ROUNDS} model responses in one turn; send a message to continue."
         )));
         TurnOutcome::Exhausted
     }
 
-    /// Keeps streamed text from a response that did not finish, so the model
-    /// knows what it already said.
-    fn keep_partial(&mut self, text: String) {
-        if !text.trim().is_empty() {
-            self.messages.push(ChatMessage::assistant(text));
-        }
+    fn keep_partial(&mut self, text: String) -> bool {
+        text.trim().is_empty() || self.append(ChatMessage::assistant(text))
     }
 
-    fn push_tool_responses(&mut self, responses: Vec<ToolResponse>) {
-        self.messages
-            .push(ChatMessage::tool(MessageContent::from_tool_responses(
-                responses,
-            )));
+    fn push_tool_response(&mut self, response: ToolResponse) -> bool {
+        self.append(ChatMessage::tool(MessageContent::from_tool_responses(
+            vec![response],
+        )))
     }
 }
 
@@ -243,18 +325,33 @@ async fn run_interruptible(
 }
 
 /// Talks to an [`Agent`] running on its own task.
+enum Command {
+    Submit(String, CancellationToken),
+    Reset,
+    Shutdown(tokio::sync::oneshot::Sender<()>),
+}
+
 #[derive(Clone)]
 pub struct AgentHandle {
-    commands: mpsc::UnboundedSender<(String, CancellationToken)>,
+    commands: mpsc::UnboundedSender<Command>,
     cancel: Arc<Mutex<CancellationToken>>,
 }
 
 impl AgentHandle {
     pub fn spawn(mut agent: Agent) -> Self {
-        let (commands, mut queue) = mpsc::unbounded_channel::<(String, CancellationToken)>();
+        let (commands, mut queue) = mpsc::unbounded_channel::<Command>();
         tokio::spawn(async move {
-            while let Some((text, cancel)) = queue.recv().await {
-                agent.submit(text, &cancel).await;
+            while let Some(command) = queue.recv().await {
+                match command {
+                    Command::Submit(text, cancel) => {
+                        agent.submit(text, &cancel).await;
+                    }
+                    Command::Reset => agent.reset(),
+                    Command::Shutdown(done) => {
+                        let _ = done.send(());
+                        break;
+                    }
+                }
             }
         });
         Self {
@@ -266,7 +363,19 @@ impl AgentHandle {
     /// Queues a user message; it runs once any current turn has finished.
     pub fn send(&self, text: String) {
         let cancel = self.cancel.lock().unwrap().clone();
-        let _ = self.commands.send((text, cancel));
+        let _ = self.commands.send(Command::Submit(text, cancel));
+    }
+
+    pub fn reset(&self) {
+        let _ = self.commands.send(Command::Reset);
+    }
+
+    pub async fn shutdown(&self) {
+        self.interrupt();
+        let (done, wait) = tokio::sync::oneshot::channel();
+        if self.commands.send(Command::Shutdown(done)).is_ok() {
+            let _ = wait.await;
+        }
     }
 
     /// Stops the running turn and any queued before this call: the in-flight
@@ -379,6 +488,219 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn context_retry_trims_request_without_changing_history() {
+        let mut h = harness(vec![vec![text("old response")]]);
+        h.agent
+            .submit("old input".into(), &CancellationToken::new())
+            .await;
+        h.provider.push_error("maximum context length exceeded");
+        h.provider.push(vec![text("new response"), Step::Usage(42)]);
+        assert_eq!(
+            h.agent
+                .submit("latest".into(), &CancellationToken::new())
+                .await,
+            TurnOutcome::Completed
+        );
+        assert_eq!(h.agent.messages().len(), 4);
+        let requests = h.provider.requests.lock().unwrap();
+        assert_eq!(requests.len(), 3);
+        assert_eq!(requests[1].messages.len(), 3);
+        assert_eq!(requests[2].messages.len(), 1);
+        assert_eq!(requests[2].system.as_deref(), Some("system"));
+        let events = drain(&mut h.events);
+        assert!(events.contains(&AgentEvent::Usage { prompt_tokens: 42 }));
+        assert_eq!(events.iter().filter(|event| matches!(event, AgentEvent::Notice(message) if message.contains("Context shortened"))).count(), 1);
+    }
+
+    #[tokio::test]
+    async fn context_errors_retry_only_once_and_never_after_partial_output() {
+        let mut h = harness(vec![vec![Step::Fail("prompt is too long".into())]]);
+        h.provider.push_error("context_length_exceeded");
+        h.provider.push(vec![text("must not request")]);
+        assert_eq!(
+            h.agent
+                .submit("hello".into(), &CancellationToken::new())
+                .await,
+            TurnOutcome::Failed
+        );
+        assert_eq!(h.provider.requests.lock().unwrap().len(), 2);
+
+        let mut h = harness(vec![vec![
+            text("partial"),
+            Step::Fail("context_length_exceeded".into()),
+        ]]);
+        assert_eq!(
+            h.agent
+                .submit("hello".into(), &CancellationToken::new())
+                .await,
+            TurnOutcome::Failed
+        );
+        assert_eq!(h.provider.requests.lock().unwrap().len(), 1);
+        assert_eq!(h.agent.messages()[1].content.first_text(), Some("partial"));
+    }
+
+    #[tokio::test]
+    async fn storage_failure_prevents_requests_and_tool_execution() {
+        let mut h = harness(vec![vec![text("must not request")]]);
+        let data = tempfile::tempdir().unwrap();
+        let (session, restored) =
+            crate::session::Session::open_in(h._dir.path(), data.path()).unwrap();
+        session.fail_writes();
+        h.agent = h.agent.with_session(session, restored.messages);
+        assert_eq!(
+            h.agent
+                .submit("hello".into(), &CancellationToken::new())
+                .await,
+            TurnOutcome::Failed
+        );
+        assert!(h.provider.requests.lock().unwrap().is_empty());
+
+        struct FailAfterRequest {
+            session: crate::session::Session,
+            provider: ScriptedProvider,
+        }
+        impl Provider for FailAfterRequest {
+            fn stream(
+                &self,
+                request: ChatRequest,
+            ) -> BoxFuture<'_, Result<crate::provider::EventStream, crate::provider::ProviderError>>
+            {
+                self.session.fail_writes();
+                self.provider.stream(request)
+            }
+        }
+        let mut h = harness(vec![vec![tool_call("c", "list", json!({}))]]);
+        let data = tempfile::tempdir().unwrap();
+        let (session, restored) =
+            crate::session::Session::open_in(h._dir.path(), data.path()).unwrap();
+        h.agent.provider = Arc::new(FailAfterRequest {
+            session: session.clone(),
+            provider: h.provider.clone(),
+        });
+        h.agent = h.agent.with_session(session, restored.messages);
+        assert_eq!(
+            h.agent
+                .submit("hello".into(), &CancellationToken::new())
+                .await,
+            TurnOutcome::Failed
+        );
+        assert_eq!(h.provider.requests.lock().unwrap().len(), 1);
+        assert!(
+            !drain(&mut h.events)
+                .iter()
+                .any(|event| matches!(event, AgentEvent::ToolCall { .. }))
+        );
+        assert_eq!(
+            h.agent
+                .submit("again".into(), &CancellationToken::new())
+                .await,
+            TurnOutcome::Failed
+        );
+        assert_eq!(h.provider.requests.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn streamed_text_survives_a_hard_crash() {
+        let mut h = harness(vec![vec![text("saved partial"), Step::Hang]]);
+        let data = tempfile::tempdir().unwrap();
+        let (session, restored) =
+            crate::session::Session::open_in(h._dir.path(), data.path()).unwrap();
+        h.agent = h.agent.with_session(session, restored.messages);
+        let mut events = h.events;
+        let task = tokio::spawn(async move {
+            h.agent
+                .submit("hello".into(), &CancellationToken::new())
+                .await
+        });
+        while events.recv().await != Some(AgentEvent::AssistantDelta("saved partial".into())) {}
+        task.abort();
+        let _ = task.await;
+        let (_, restored) = crate::session::Session::open_in(h._dir.path(), data.path()).unwrap();
+        assert_eq!(restored.messages.len(), 2);
+        assert_eq!(
+            restored.messages[1].content.first_text(),
+            Some("saved partial")
+        );
+    }
+
+    #[tokio::test]
+    async fn persisted_model_history_is_replayed_on_resume() {
+        let mut h = harness(vec![
+            vec![tool_call("c", "list", json!({}))],
+            vec![text("done")],
+        ]);
+        let data = tempfile::tempdir().unwrap();
+        let (session, restored) =
+            crate::session::Session::open_in(h._dir.path(), data.path()).unwrap();
+        h.agent = h.agent.with_session(session, restored.messages);
+        assert_eq!(
+            h.agent
+                .submit("hello".into(), &CancellationToken::new())
+                .await,
+            TurnOutcome::Completed
+        );
+        let expected = serde_json::to_value(h.agent.messages()).unwrap();
+        drop(h.agent);
+        let (_, restored) = crate::session::Session::open_in(h._dir.path(), data.path()).unwrap();
+        assert_eq!(serde_json::to_value(restored.messages).unwrap(), expected);
+    }
+
+    #[tokio::test]
+    async fn completed_tool_results_survive_a_crash_during_the_next_tool() {
+        let mut h = harness(vec![vec![
+            tool_call("finished", "list", json!({})),
+            tool_call("unfinished", "slow", json!({})),
+        ]]);
+        let data = tempfile::tempdir().unwrap();
+        let (session, restored) =
+            crate::session::Session::open_in(h._dir.path(), data.path()).unwrap();
+        h.agent = h.agent.with_session(session, restored.messages);
+        let mut events = h.events;
+        let task = tokio::spawn(async move {
+            h.agent
+                .submit("hello".into(), &CancellationToken::new())
+                .await
+        });
+        loop {
+            if matches!(events.recv().await, Some(AgentEvent::ToolCall { id, .. }) if id == "unfinished")
+            {
+                break;
+            }
+        }
+        task.abort();
+        let _ = task.await;
+        let (_, restored) = crate::session::Session::open_in(h._dir.path(), data.path()).unwrap();
+        let results: Vec<_> = restored
+            .messages
+            .iter()
+            .flat_map(|message| message.content.tool_responses())
+            .collect();
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].call_id, "finished");
+        assert!(!results[0].content.to_lowercase().contains("interrupted"));
+        assert_eq!(results[1].call_id, "unfinished");
+        assert!(results[1].content.to_lowercase().contains("interrupted"));
+    }
+
+    #[tokio::test]
+    async fn reset_clears_messages_and_shutdown_waits_for_the_turn() {
+        let h = harness(vec![vec![text("old")], vec![text("new")]]);
+        let provider = h.provider.clone();
+        let mut events = h.events;
+        let handle = AgentHandle::spawn(h.agent);
+        handle.send("first".into());
+        while events.recv().await != Some(AgentEvent::TurnFinished(TurnOutcome::Completed)) {}
+        handle.reset();
+        handle.send("second".into());
+        while events.recv().await != Some(AgentEvent::TurnFinished(TurnOutcome::Completed)) {}
+        handle.shutdown().await;
+        let requests = provider.requests.lock().unwrap();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[1].messages.len(), 1);
+        assert_eq!(requests[1].messages[0].content.first_text(), Some("second"));
+    }
+
+    #[tokio::test]
     async fn interruptible_tool_reports_partial_result() {
         let mut h = harness(vec![vec![
             tool_call("a", "watcher", json!({})),
@@ -398,7 +720,10 @@ mod tests {
             output: "partial: still running".into(),
             is_error: false,
         }));
-        let responses = h.agent.messages()[2].content.tool_responses();
+        let responses: Vec<_> = h.agent.messages()[2..]
+            .iter()
+            .flat_map(|m| m.content.tool_responses())
+            .collect();
         assert_eq!(responses[0].content, "partial: still running");
         assert_eq!(responses[1].call_id, "b");
         assert_eq!(responses[1].content, INTERRUPTED_TOOL);
@@ -476,12 +801,16 @@ mod tests {
                 ChatRole::User,
                 ChatRole::Assistant,
                 ChatRole::Tool,
+                ChatRole::Tool,
                 ChatRole::Assistant
             ]
         );
         let requests = h.provider.requests.lock().unwrap();
         assert_eq!(requests.len(), 2);
-        let responses = requests[1].messages[2].content.tool_responses();
+        let responses: Vec<_> = requests[1].messages[2..]
+            .iter()
+            .flat_map(|m| m.content.tool_responses())
+            .collect();
         assert_eq!(responses.len(), 2);
         assert_eq!(responses[0].call_id, "c1");
         assert_eq!(responses[0].content, "1\thi there");
@@ -528,9 +857,17 @@ mod tests {
         assert_eq!(outcome, TurnOutcome::Interrupted);
         assert_eq!(
             roles(&h.agent),
-            [ChatRole::User, ChatRole::Assistant, ChatRole::Tool]
+            [
+                ChatRole::User,
+                ChatRole::Assistant,
+                ChatRole::Tool,
+                ChatRole::Tool
+            ]
         );
-        let responses = h.agent.messages()[2].content.tool_responses();
+        let responses: Vec<_> = h.agent.messages()[2..]
+            .iter()
+            .flat_map(|m| m.content.tool_responses())
+            .collect();
         let ids: Vec<_> = responses.iter().map(|r| r.call_id.as_str()).collect();
         assert_eq!(ids, ["a", "b"]);
         assert!(responses.iter().all(|r| r.content == INTERRUPTED_TOOL));

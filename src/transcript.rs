@@ -3,6 +3,9 @@
 
 use std::ops::Range;
 
+use crate::session::{LogEvent, Session, UiEvent};
+use serde::{Deserialize, Serialize};
+
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 
@@ -11,20 +14,20 @@ const TOOL_CALL_MAX_LINES: usize = 3;
 const TOOL_RESULT_MAX_LINES: usize = 6;
 const CHANGES_MAX_LINES: usize = 2;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum StreamState {
     Streaming,
     Complete,
     Interrupted,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum NoticeLevel {
     Info,
     Error,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Entry {
     User {
         text: String,
@@ -68,10 +71,42 @@ pub struct Transcript {
     items: Vec<Item>,
     /// Show tool calls and results in full instead of collapsed.
     expanded: bool,
+    session: Option<Session>,
+    persistence_error: Option<String>,
 }
 
 impl Transcript {
+    pub fn restore(events: Vec<UiEvent>) -> Self {
+        let mut transcript = Self::default();
+        for event in events {
+            match event {
+                UiEvent::Push(entry) => transcript.push(entry),
+                UiEvent::Delta(delta) => transcript.append_assistant(&delta),
+                UiEvent::Finish(state) => transcript.finish_assistant(state),
+            }
+        }
+        transcript.finish_assistant(StreamState::Interrupted);
+        transcript
+    }
+
+    pub fn attach_session(&mut self, session: Session) {
+        self.session = Some(session);
+    }
+
+    pub fn take_persistence_error(&mut self) -> Option<String> {
+        self.persistence_error.take()
+    }
+
+    fn persist(&mut self, event: UiEvent) {
+        if let Some(session) = &self.session
+            && let Err(error) = session.append(LogEvent::Ui(event))
+        {
+            self.persistence_error = Some(format!("Cannot save the conversation: {error:#}"));
+        }
+    }
+
     pub fn push(&mut self, entry: Entry) {
+        self.persist(UiEvent::Push(entry.clone()));
         self.items.push(Item {
             entry,
             layout: None,
@@ -101,6 +136,7 @@ impl Transcript {
     /// Appends streamed text to the trailing in-progress assistant entry,
     /// starting a new one if there is none.
     pub fn append_assistant(&mut self, delta: &str) {
+        self.persist(UiEvent::Delta(delta.to_owned()));
         if let Some(Item {
             entry:
                 Entry::Assistant {
@@ -113,15 +149,27 @@ impl Transcript {
             text.push_str(delta);
             *layout = None;
         } else {
-            self.push(Entry::Assistant {
-                text: delta.to_owned(),
-                state: StreamState::Streaming,
+            self.items.push(Item {
+                entry: Entry::Assistant {
+                    text: delta.to_owned(),
+                    state: StreamState::Streaming,
+                },
+                layout: None,
             });
         }
     }
 
     /// Ends the trailing in-progress assistant entry, if any.
     pub fn finish_assistant(&mut self, final_state: StreamState) {
+        if matches!(
+            self.items.last().map(|item| &item.entry),
+            Some(Entry::Assistant {
+                state: StreamState::Streaming,
+                ..
+            })
+        ) {
+            self.persist(UiEvent::Finish(final_state));
+        }
         if let Some(Item {
             entry: Entry::Assistant { state, .. },
             layout,

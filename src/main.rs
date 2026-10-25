@@ -13,6 +13,7 @@ use saddle::jobs::Jobs;
 use saddle::lsp::LspManager;
 use saddle::provider::GenaiProvider;
 use saddle::sandbox::{self, Policy, Sandbox, Setup};
+use saddle::session::Session;
 use saddle::tools::{ProjectFs, Registry, lsp as lsp_tools, shell, web_search};
 use saddle::watch::{Observed, WatchConfig, Watcher};
 use saddle::{config, events, project, prompt, tui};
@@ -68,6 +69,7 @@ async fn run() -> anyhow::Result<()> {
     let project_root = project::resolve_root(&cwd)
         .with_context(|| format!("cannot resolve project root from {}", cwd.display()))?;
     let home = std::env::var_os("HOME").map(PathBuf::from);
+    let (session, restored) = Session::open(&project_root)?;
 
     let writable = loaded.config.writable_paths(&project_root, home.as_deref());
     let mut status = Status {
@@ -81,8 +83,24 @@ async fn run() -> anyhow::Result<()> {
         .context("cannot set up the inference client")?;
     let fs = ProjectFs::new(&project_root)
         .with_context(|| format!("cannot open project root {}", project_root.display()))?;
-    let (senders, receivers) = events::channels();
+    let (senders, mut receivers) = events::channels();
     let observed = Observed::default();
+    observed.restore(restored.state.observed.clone());
+    let resume_changes = if restored.existing {
+        observed.resume(&project_root, writable.clone())
+    } else {
+        Vec::new()
+    };
+    let snapshot_session = session.clone();
+    let snapshot_events = senders.fs.clone();
+    observed.set_persistence(Arc::new(move |snapshot| {
+        if let Err(error) = snapshot_session.save_snapshots(snapshot) {
+            let _ = snapshot_events.send(events::FsEvent::Warning(format!(
+                "Cannot save file snapshots: {error:#}"
+            )));
+        }
+    }));
+    session.save_snapshots(observed.snapshot())?;
     let (changes_tx, changes_rx) = mpsc::unbounded_channel();
     let _watcher = Watcher::spawn(
         project_root.clone(),
@@ -94,7 +112,7 @@ async fn run() -> anyhow::Result<()> {
         observed.clone(),
         changes_tx,
     );
-    let mut tools = Registry::read_only(fs.clone(), observed);
+    let mut tools = Registry::read_only(fs.clone(), observed.clone());
     status.web_search = web_search::install(
         &mut tools,
         &loaded.config.search,
@@ -108,6 +126,7 @@ async fn run() -> anyhow::Result<()> {
     );
     lsp.start_detected();
     lsp_tools::install(&mut tools, lsp.clone(), fs.clone());
+    let resume_changes = enrich_resume(resume_changes, lsp.clone(), &loaded.config.batching).await;
     let changes_task = tokio::spawn(saddle::lsp::changes::forward(
         changes_rx,
         senders.fs.clone(),
@@ -124,13 +143,14 @@ async fn run() -> anyhow::Result<()> {
         &loaded.dir,
         &project_root,
         scratch.path(),
-        writable,
+        writable.clone(),
     )
     .await;
     let jobs = match shell {
         Ok(sandbox) => {
             status.sandbox = sandbox.backend().name().into();
             let jobs = Jobs::new(Arc::new(sandbox), senders.job.clone());
+            jobs.resume_after(restored.last_job_id);
             shell::install(&mut tools, jobs.clone(), fs);
             Some(jobs)
         }
@@ -148,7 +168,10 @@ async fn run() -> anyhow::Result<()> {
         tools,
         prompt::system(&project_root),
         senders.agent.clone(),
-    );
+    )
+    .with_session(session.clone(), restored.messages.clone())
+    .with_context_window(loaded.config.context_window);
+    let lost_jobs = restored.pending_jobs.clone();
     let mut app = App::new(
         loaded.config,
         loaded.credentials,
@@ -156,7 +179,9 @@ async fn run() -> anyhow::Result<()> {
         status,
         senders,
     );
+    app.attach_session(session, restored, observed, writable);
     app.attach_agent(AgentHandle::spawn(agent));
+    app.resume(resume_changes, lost_jobs);
     for (text, error) in sandbox_notes {
         app.notice(text, error);
     }
@@ -165,9 +190,19 @@ async fn run() -> anyhow::Result<()> {
     // On SIGHUP/SIGTERM (a closed terminal window) still kill the jobs and
     // remove the scratch directory.
     let result = tokio::select! {
-        result = app::run(&mut terminal, &mut app, EventStream::new(), receivers) => result,
+        result = app::run(&mut terminal, &mut app, EventStream::new(), &mut receivers) => result,
         _ = termination() => Ok(()),
     };
+    app.should_quit = true;
+    if let Some(agent) = &app.agent {
+        agent.shutdown().await;
+    }
+    while let Ok(event) = receivers.agent.try_recv() {
+        app.handle_agent_event(event);
+    }
+    while let Ok(event) = receivers.job.try_recv() {
+        app.handle_job_event(event);
+    }
     drop(guard);
     if let Some(jobs) = jobs {
         jobs.shutdown().await;
@@ -175,7 +210,44 @@ async fn run() -> anyhow::Result<()> {
     drop(scratch);
     changes_task.abort();
     lsp.shutdown().await;
+    if let Some(error) = app.transcript.take_persistence_error() {
+        anyhow::bail!(error);
+    }
     result
+}
+
+async fn enrich_resume(
+    files: Vec<saddle::watch::FileChange>,
+    lsp: LspManager,
+    batching: &config::BatchingConfig,
+) -> saddle::watch::ChangeSet {
+    let set = saddle::watch::ChangeSet {
+        files,
+        diagnostics: None,
+    };
+    if set.files.is_empty() || !lsp.has_servers_configured() {
+        return set;
+    }
+    let (input, incoming) = mpsc::unbounded_channel();
+    let (output, mut outgoing) = mpsc::unbounded_channel();
+    input
+        .send(events::FsEvent::Changed(Arc::new(set.clone())))
+        .unwrap();
+    drop(input);
+    saddle::lsp::changes::forward(
+        incoming,
+        output,
+        lsp,
+        Duration::from_millis(batching.diagnostics_quiet_ms),
+        Duration::from_millis(batching.diagnostics_max_wait_ms),
+    )
+    .await;
+    while let Some(event) = outgoing.recv().await {
+        if let events::FsEvent::Changed(changes) = event {
+            return (*changes).clone();
+        }
+    }
+    set
 }
 
 async fn termination() {

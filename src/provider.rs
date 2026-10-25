@@ -19,6 +19,23 @@ use crate::config::{ApiFamily, Config, Credentials, expand_tilde};
 #[error("{0}")]
 pub struct ProviderError(pub String);
 
+impl ProviderError {
+    pub fn is_context_length(&self) -> bool {
+        let text = self.0.to_lowercase();
+        [
+            "context_length_exceeded",
+            "maximum context length",
+            "context window",
+            "prompt is too long",
+            "prompt too long",
+            "too many input tokens",
+            "input is too long",
+        ]
+        .iter()
+        .any(|marker| text.contains(marker))
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum StreamEvent {
     Text(String),
@@ -31,6 +48,7 @@ pub enum StreamEvent {
 #[derive(Debug, Clone, Default)]
 pub struct Completion {
     pub content: MessageContent,
+    pub prompt_tokens: Option<usize>,
     /// The response was cut off by the output token limit.
     pub truncated: bool,
 }
@@ -96,6 +114,7 @@ impl GenaiProvider {
 
         let mut options = ChatOptions::default()
             .with_max_tokens(config.max_tokens)
+            .with_capture_usage(true)
             .with_capture_content(true)
             .with_capture_tool_calls(true)
             .with_capture_reasoning_content(true)
@@ -153,6 +172,10 @@ impl Provider for GenaiProvider {
                         }
                         Ok(ChatStreamEvent::End(end)) => Some(Ok(StreamEvent::End(Completion {
                             content: end.captured_content.unwrap_or_default(),
+                            prompt_tokens: end
+                                .captured_usage
+                                .and_then(|usage| usage.prompt_tokens)
+                                .and_then(|tokens| usize::try_from(tokens).ok()),
                             truncated: matches!(
                                 end.captured_stop_reason,
                                 Some(StopReason::MaxTokens(_))
@@ -277,6 +300,7 @@ pub mod scripted {
     #[derive(Debug, Clone)]
     pub enum Step {
         Text(String),
+        Usage(usize),
         ToolCall {
             id: String,
             name: String,
@@ -344,9 +368,11 @@ pub mod scripted {
                 let mut events = Vec::new();
                 let mut parts = Vec::new();
                 let mut text = String::new();
+                let mut prompt_tokens = None;
                 let mut open = false;
                 for step in steps {
                     match step {
+                        Step::Usage(tokens) => prompt_tokens = Some(tokens),
                         Step::Text(t) => {
                             text.push_str(&t);
                             events.push(Ok(StreamEvent::Text(t)));
@@ -382,6 +408,7 @@ pub mod scripted {
                     events.push(Ok(StreamEvent::End(Completion {
                         content,
                         truncated: false,
+                        prompt_tokens,
                     })));
                 }
                 let events = stream::iter(events);
@@ -398,6 +425,21 @@ pub mod scripted {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn context_length_errors_are_distinct_from_other_failures() {
+        for message in [
+            "context_length_exceeded",
+            "This model's maximum context length is 128000",
+            "prompt is too long: 200000 tokens",
+            "input is too long",
+        ] {
+            assert!(ProviderError(message.into()).is_context_length());
+        }
+        for message in ["HTTP 401 bad key", "rate limited", "network timeout"] {
+            assert!(!ProviderError(message.into()).is_context_length());
+        }
+    }
 
     #[test]
     fn status_errors_are_readable_with_hints() {

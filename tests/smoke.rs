@@ -70,14 +70,14 @@ async fn settle() {
 
 #[tokio::test]
 async fn conversation_renders_through_the_event_loop() {
-    let (senders, receivers) = events::channels();
+    let (senders, mut receivers) = events::channels();
     let agent = senders.agent.clone();
     let mut app = app(senders);
     let (input, terminal_events) = mpsc::unbounded();
 
     let handle = tokio::spawn(async move {
         let mut terminal = Terminal::new(TestBackend::new(80, 20)).unwrap();
-        app::run(&mut terminal, &mut app, terminal_events, receivers)
+        app::run(&mut terminal, &mut app, terminal_events, &mut receivers)
             .await
             .unwrap();
         (terminal, app)
@@ -148,11 +148,11 @@ async fn conversation_renders_through_the_event_loop() {
 
 #[tokio::test]
 async fn loop_ends_when_terminal_input_ends() {
-    let (senders, receivers) = events::channels();
+    let (senders, mut receivers) = events::channels();
     let mut app = app(senders);
     let mut terminal = Terminal::new(TestBackend::new(40, 10)).unwrap();
     let terminal_events = futures::stream::iter(typed("hi"));
-    app::run(&mut terminal, &mut app, terminal_events, receivers)
+    app::run(&mut terminal, &mut app, terminal_events, &mut receivers)
         .await
         .unwrap();
     assert_eq!(app.input.lines(), ["hi"]);
@@ -161,7 +161,7 @@ async fn loop_ends_when_terminal_input_ends() {
 
 #[tokio::test]
 async fn page_up_scrolls_away_from_the_bottom() {
-    let (senders, receivers) = events::channels();
+    let (senders, mut receivers) = events::channels();
     let agent = senders.agent.clone();
     let mut app = app(senders);
     for i in 0..50 {
@@ -170,7 +170,7 @@ async fn page_up_scrolls_away_from_the_bottom() {
     let (input, terminal_events) = mpsc::unbounded();
     let handle = tokio::spawn(async move {
         let mut terminal = Terminal::new(TestBackend::new(100, 12)).unwrap();
-        app::run(&mut terminal, &mut app, terminal_events, receivers)
+        app::run(&mut terminal, &mut app, terminal_events, &mut receivers)
             .await
             .unwrap();
         (terminal, app)
@@ -203,7 +203,7 @@ async fn agent_turn_runs_tools_and_can_be_interrupted() {
         vec![text("A long answer"), Step::Hang],
     ]);
 
-    let (senders, receivers) = events::channels();
+    let (senders, mut receivers) = events::channels();
     let agent = Agent::new(
         Arc::new(provider.clone()),
         Registry::read_only(ProjectFs::new(dir.path()).unwrap(), Observed::default()),
@@ -216,7 +216,7 @@ async fn agent_turn_runs_tools_and_can_be_interrupted() {
     let (input, terminal_events) = mpsc::unbounded();
     let handle = tokio::spawn(async move {
         let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
-        app::run(&mut terminal, &mut app, terminal_events, receivers)
+        app::run(&mut terminal, &mut app, terminal_events, &mut receivers)
             .await
             .unwrap();
         (terminal, app)
@@ -309,7 +309,7 @@ async fn saved_changes_interrupt_the_turn_and_start_a_new_one() {
         vec![text("You changed the greeting.")],
     ]);
 
-    let (senders, receivers) = events::channels();
+    let (senders, mut receivers) = events::channels();
     let observed = Observed::default();
     let _watcher = Watcher::spawn(
         root.clone(),
@@ -333,7 +333,7 @@ async fn saved_changes_interrupt_the_turn_and_start_a_new_one() {
     let (input, terminal_events) = mpsc::unbounded();
     let handle = tokio::spawn(async move {
         let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
-        app::run(&mut terminal, &mut app, terminal_events, receivers)
+        app::run(&mut terminal, &mut app, terminal_events, &mut receivers)
             .await
             .unwrap();
         (terminal, app)
@@ -409,13 +409,13 @@ async fn lsp_status_reaches_the_status_line() {
     use saddle::events::LspEvent;
     use saddle::lsp::{ServerState, ServerStatus};
 
-    let (senders, receivers) = events::channels();
+    let (senders, mut receivers) = events::channels();
     let lsp = senders.lsp.clone();
     let mut app = app(senders);
     let (input, terminal_events) = mpsc::unbounded();
     let handle = tokio::spawn(async move {
         let mut terminal = Terminal::new(TestBackend::new(120, 10)).unwrap();
-        app::run(&mut terminal, &mut app, terminal_events, receivers)
+        app::run(&mut terminal, &mut app, terminal_events, &mut receivers)
             .await
             .unwrap();
         (terminal, app)

@@ -20,6 +20,9 @@ pub enum TurnOutcome {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AgentEvent {
+    Usage {
+        prompt_tokens: usize,
+    },
     TurnStarted,
     TurnFinished(TurnOutcome),
     /// The model is reasoning; the content itself is not shown.

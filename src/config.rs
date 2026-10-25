@@ -96,6 +96,8 @@ pub struct Config {
     /// Output token limit per model response.
     #[serde(default = "default_max_tokens")]
     pub max_tokens: u32,
+    #[serde(default = "default_context_window")]
+    pub context_window: usize,
     /// Reasoning effort keyword (`low`, `medium`, `high`, …) or a token budget.
     #[serde(default)]
     pub reasoning_effort: Option<String>,
@@ -154,6 +156,10 @@ impl Default for SandboxConfig {
 
 fn default_max_tokens() -> u32 {
     16_384
+}
+
+fn default_context_window() -> usize {
+    128_000
 }
 
 fn default_global_writable() -> Vec<String> {
@@ -232,6 +238,9 @@ impl Config {
         }
         if self.max_tokens == 0 {
             return Err("`max_tokens` must be positive".into());
+        }
+        if self.context_window == 0 {
+            return Err("`context_window` must be positive".into());
         }
         if let Some(effort) = &self.reasoning_effort
             && effort.parse::<genai::chat::ReasoningEffort>().is_err()
@@ -468,6 +477,7 @@ model = "claude-sonnet-4-5"
 api = "responses"
 base_url = "https://litellm.bb3.internal"
 max_tokens = 4096
+context_window = 200000
 reasoning_effort = "medium"
 ca_file = "~/.config/saddle/ca.pem"
 
@@ -502,6 +512,7 @@ num_results = 8
         assert_eq!(config.api, ApiFamily::Responses);
         assert_eq!(config.base_url, "https://litellm.bb3.internal");
         assert_eq!(config.max_tokens, 4096);
+        assert_eq!(config.context_window, 200_000);
         assert_eq!(config.reasoning_effort.as_deref(), Some("medium"));
         assert_eq!(config.ca_file.as_deref(), Some("~/.config/saddle/ca.pem"));
         let rust = &config.lsp["rust"];
@@ -529,6 +540,7 @@ num_results = 8
         let config = Config::parse(CONFIG_EXAMPLE, &p()).unwrap();
         assert_eq!(config.api, ApiFamily::Messages);
         assert_eq!(config.max_tokens, 16_384);
+        assert_eq!(config.context_window, 128_000);
         assert_eq!(config.reasoning_effort, None);
         assert!(config.lsp.is_empty());
         assert_eq!(config.sandbox, SandboxConfig::default());
@@ -575,6 +587,10 @@ num_results = 8
                 "model",
             ),
             (format!("{CONFIG_EXAMPLE}\nmax_tokens = 0\n"), "max_tokens"),
+            (
+                format!("{CONFIG_EXAMPLE}\ncontext_window = 0\n"),
+                "context_window",
+            ),
             (
                 format!("{CONFIG_EXAMPLE}\nreasoning_effort = \"lots\"\n"),
                 "reasoning_effort",
